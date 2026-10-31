@@ -1961,3 +1961,55 @@ TESTS:
    и успешный CI на том же commit.
 4. В сборку не допускается commit, содержащий только изменения Guard.
 
+
+
+---
+
+PATCH-ID: Q003-B-C-D-E-MODULE-BOOTSTRAP-001
+
+TARGET FILE: main.py
+
+PURPOSE:
+
+Инициализировать единые локальные хранилища Q-003 в Base App после
+создания PersistentCore. owner_id создаётся один раз и далее читается
+из стабильного owner-identity.json. Participant identity далее связывается
+с доверенным route_id, а не с отображаемым именем.
+
+ORIGINAL FRAGMENT BEGIN
+
+        self.report_path = Path(self.user_data_dir) / REPORT_RELATIVE_PATH
+        from yj64_persistent_core import PersistentCore
+        self.persistent_core = PersistentCore(self.user_data_dir)
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+        from yj64_persistent_core import PersistentCore
+        self.persistent_core = PersistentCore(self.user_data_dir)
+        from permission_manager import PermissionManager
+        self.owner_id = PermissionManager.load_or_create_owner_id(self.user_data_dir)
+        self.permission_manager = PermissionManager(self.user_data_dir, self.owner_id)
+        from semantic_memory import SemanticMemory
+        self.semantic_memory = SemanticMemory(self.user_data_dir)
+        from system_chat import SystemChatStore
+        self.system_chat_store = SystemChatStore(self.user_data_dir, self.owner_id)
+
+NEW FRAGMENT END
+
+TESTS:
+
+1. Первый запуск создаёт owner-identity.json со стабильным UUID.
+2. Повторный запуск сохраняет тот же owner_id.
+3. Ошибка чтения identity не создаёт новую личность и не перезаписывает файл.
+4. Все хранилища инициализируются в одном app-private workspace.
+5. Отображаемые названия Participant 1/2 не используются как security identity.
+
+IMPLEMENTATION GATE:
+
+Это только bootstrap. Следующие патчи обязаны добавить реальные проверки
+PermissionManager перед каждой защищённой операцией и подключить
+SystemChatStore/SemanticMemory к фактическим запросам. Инициализация
+объектов не является доказательством завершения Q-003.
+
