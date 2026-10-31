@@ -165,23 +165,107 @@ END ALLOWED
 
 ---
 
-PATCH-ID: YJ64-PRIVATE-ARCHIVE-001
+PATCH-ID: YJ64-PRIVATE-CHAT-ARCHIVE-001
+
+TARGET FILE: chat_workspace.py
+
+PURPOSE:
+
+Добавить метаданные личной переписки, необходимые для классификации
+и проверки доступа. Существующий формат файлов histories/*.json
+и совместимость чтения старых историй должны быть сохранены.
+
+REQUIREMENTS:
+
+1. Каждая личная переписка получает стабильный chat_id.
+2. Метаданные хранят visibility="private", chat_type="personal",
+   owner_id и user_id.
+3. owner_id — стабильный идентификатор локального владельца приложения.
+4. user_id — идентификатор пользователя, которому принадлежит запись.
+5. Старые истории без метаданных не объявляются общими автоматически:
+   они считаются неопределёнными и не экспортируются в общий архив.
+6. Существующие сообщения и файлы не удаляются и не переписываются.
+
+ORIGINAL FRAGMENT BEGIN
+
+    def _history_path(self, name: str) -> Path:
+        key = "".join(c for c in str(name) if c.isalnum() or c in "-_ ").strip().replace(" ", "_")
+        return self.histories_dir / ((key or "participant") + ".json")
+
+    def load_named_history(self, name: str) -> list[dict[str, Any]]:
+        data = self._read_json(self._history_path(name), [])
+        if not isinstance(data, list):
+            return []
+        normalized = [self._normalize_message(x) for x in data if isinstance(x, dict)]
+        if normalized != data:
+            self._write_json(self._history_path(name), normalized)
+        return normalized
+
+    def save_named_history(self, name: str, history: list[dict[str, Any]]) -> None:
+        self._write_json(self._history_path(name), [self._normalize_message(x) for x in history if isinstance(x, dict)])
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+    def _history_path(self, name: str) -> Path:
+        key = "".join(c for c in str(name) if c.isalnum() or c in "-_ ").strip().replace(" ", "_")
+        return self.histories_dir / ((key or "participant") + ".json")
+
+    def _private_metadata_path(self, name: str) -> Path:
+        return self.histories_dir / (self._history_path(name).stem + ".meta.json")
+
+    def load_named_history(self, name: str) -> list[dict[str, Any]]:
+        data = self._read_json(self._history_path(name), [])
+        if not isinstance(data, list):
+            return []
+        normalized = [self._normalize_message(x) for x in data if isinstance(x, dict)]
+        if normalized != data:
+            self._write_json(self._history_path(name), normalized)
+        return normalized
+
+    def save_named_history(self, name: str, history: list[dict[str, Any]]) -> None:
+        self._write_json(self._history_path(name), [self._normalize_message(x) for x in history if isinstance(x, dict)])
+
+    def load_private_chat_metadata(self, name: str) -> dict[str, Any] | None:
+        data = self._read_json(self._private_metadata_path(name), None)
+        if not isinstance(data, dict):
+            return None
+        required = ("chat_id", "visibility", "chat_type", "owner_id", "user_id")
+        if any(not str(data.get(key) or "").strip() for key in required):
+            return None
+        if data.get("visibility") != "private" or data.get("chat_type") != "personal":
+            return None
+        return data
+
+    def save_private_chat_metadata(
+        self, name: str, *, chat_id: str, owner_id: str, user_id: str
+    ) -> None:
+        values = {
+            "chat_id": str(chat_id),
+            "visibility": "private",
+            "chat_type": "personal",
+            "owner_id": str(owner_id),
+            "user_id": str(user_id),
+        }
+        if any(not values[key].strip() for key in ("chat_id", "owner_id", "user_id")):
+            raise ValueError("Private chat identity fields must not be empty")
+        self._write_json(self._private_metadata_path(name), values)
+
+NEW FRAGMENT END
+
+---
+
+PATCH-ID: YJ64-PRIVATE-CHAT-ARCHIVE-002
 
 TARGET FILE: yj64_persistent_core.py
 
 PURPOSE:
 
-Разделить общий и личный архивы на уровне источника данных.
-
-1. Общий архив не включает yj64-workspace/histories/.
-2. История каждого участника сохраняется в отдельный ZIP.
-3. Личные ZIP размещаются только во внутреннем хранилище приложения
-   yj64-private-archives, не в Download и не в общем ZIP.
-4. Архив каждого участника содержит только его собственную историю.
-5. Существующие сообщения и файлы не удаляются и не переписываются.
-6. Существующие ранее созданные ZIP не сканируются и не изменяются.
-7. При повторном экспорте личный ZIP атомарно обновляется полной
-   текущей историей соответствующего участника.
+Исключить личные истории и метаданные из общего накопительного ZIP.
+Не менять механизм инкрементального слияния общей истории и не сканировать
+или переписывать ранее созданные архивы. Отдельные личные ZIP создавать
+только для записей с подтверждёнными метаданными и после проверки доступа.
 
 ORIGINAL FRAGMENT BEGIN
 
@@ -198,8 +282,7 @@ ORIGINAL FRAGMENT BEGIN
             for p in self.root.glob(pattern):
                 if p.is_file() and not p.is_symlink():result[p.name]=self._sanitize_json(p.read_bytes())
         return result
-    @staticmethod
-    def _merge_history
+
 ORIGINAL FRAGMENT END
 
 NEW FRAGMENT BEGIN
@@ -218,88 +301,86 @@ NEW FRAGMENT BEGIN
                 result[name]=self._sanitize_json(data) if p.suffix.lower()==".json" else data
         for pattern in ("yj64-router-config.json","yj64-llm-config*.json"):
             for p in self.root.glob(pattern):
-                if p.is_file() and not p.is_symlink():
-                    result[p.name]=self._sanitize_json(p.read_bytes())
+                if p.is_file() and not p.is_symlink():result[p.name]=self._sanitize_json(p.read_bytes())
         return result
 
-    def export_private_archives(self)->list[Path]:
-        """Write one isolated private ZIP per participant into app-private storage."""
-        source_dir=self.workspace_path/"histories"
-        if not source_dir.is_dir() or source_dir.is_symlink():
-            return []
-        target_dir=self.root/"yj64-private-archives"
-        target_dir.mkdir(parents=True,exist_ok=True)
-        created=[]
-        for source in sorted(source_dir.glob("*.json")):
-            if not source.is_file() or source.is_symlink():
-                continue
-            participant_id=source.stem
-            if not participant_id or not re.fullmatch(r"[A-Za-z0-9_-]+",participant_id):
-                continue
-            payload=source.read_bytes()
-            try:
-                rows=json.loads(payload.decode("utf-8"))
-            except (UnicodeDecodeError,json.JSONDecodeError) as exc:
-                raise IOError("Invalid private history: "+source.name) from exc
-            if not isinstance(rows,list):
-                raise IOError("Private history must be a JSON list: "+source.name)
-            member="histories/"+source.name
-            now=int(time.time()*1000)
-            manifest={
-                "schema":"yj64.private-chat.v1",
-                "participant_id":participant_id,
-                "created_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime(now/1000)),
-                "files":{member:{"sha256":self._sha(payload),"size":len(payload)}},
-            }
-            destination=target_dir/("YJ-64-PRIVATE-"+participant_id+".zip")
-            temporary=destination.with_suffix(".zip.tmp")
-            try:
-                with zipfile.ZipFile(temporary,"w",compression=zipfile.ZIP_DEFLATED) as archive:
-                    archive.writestr(member,payload)
-                    archive.writestr("manifest.json",json.dumps(manifest,ensure_ascii=False,indent=2))
-                with zipfile.ZipFile(temporary,"r") as check:
-                    if check.testzip() or set(check.namelist())!={member,"manifest.json"}:
-                        raise IOError("Private archive integrity check failed: "+participant_id)
-                    if self._sha(check.read(member))!=manifest["files"][member]["sha256"]:
-                        raise IOError("Private archive SHA-256 mismatch: "+participant_id)
-                os.replace(temporary,destination)
-            except Exception:
-                temporary.unlink(missing_ok=True)
-                raise
-            created.append(destination)
-        return created
-
-    @staticmethod
-    def _merge_history
 NEW FRAGMENT END
+
+ADDITIONAL IMPLEMENTATION REQUIREMENTS:
+
+1. Добавить classify_chat(chat): private только при visibility="private"
+   ИЛИ chat_type="personal"; common — только при явном признаке
+   общей переписки. Неопределённые записи пропускать.
+2. Добавить check_private_access(chat, requester_id): разрешать доступ
+   только если requester_id не пуст и совпадает с owner_id или user_id.
+   Проверку выполнять на каждом чтении и каждой записи/экспорте.
+3. Для каждой личной переписки создавать отдельный ZIP, не один ZIP
+   на участника. В имени использовать безопасный chat_id плюс уникальный
+   суффикс, чтобы несколько архивов не перезаписывали друг друга.
+4. Личные ZIP сохранять в Download/YJ-64 через Android MediaStore/
+   SAF, используя уже существующий механизм публичного экспорта в main.py.
+   Не писать напрямую в публичный путь в обход scoped storage.
+5. Общий ZIP должен сохранять текущую накопительную схему, manifest,
+   SHA-256 и атомарную замену. Фильтрация histories/ применяется к новым
+   данным; содержимое прежних накопленных ZIP не очищать и не изменять.
+6. Не считать наличие функций проверки доступа доказательством шифрования:
+   ZIP не зашифрован, если отдельно не реализовано шифрование.
 
 ---
 
-PATCH-ID: YJ64-PRIVATE-ARCHIVE-002
+PATCH-ID: YJ64-PRIVATE-CHAT-ARCHIVE-003
 
-TARGET FILE: yj64_persistent_core.py
+TARGET FILE: main.py
 
 PURPOSE:
 
-Запускать создание отдельных личных ZIP при каждом штатном экспорте
-общего архива. Общий ZIP остаётся без личных историй; личные ZIP
-обновляются независимо и остаются во внутреннем хранилище приложения.
+Связать существующие приватные истории участников с метаданными владельца,
+проверкой доступа и созданием отдельного ZIP на каждую личную переписку.
+Использовать существующий Android MediaStore export path Download/YJ-64.
+Не менять текущий общий экспорт, его readback-проверку и удаление
+незавершённой MediaStore-записи при ошибке.
 
 ORIGINAL FRAGMENT BEGIN
 
-        return dest
+            self._save_common_history()
+            self.persistent_core.export_archive(temp_path)
+            from jnius import autoclass
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
 
 ORIGINAL FRAGMENT END
 
 NEW FRAGMENT BEGIN
 
-        self.export_private_archives()
-        return dest
+            self._save_common_history()
+            # Перед экспортом собрать private chat records из workspace.histories_dir
+            # и соответствующих sidecar metadata; неизвестные/неполные записи
+            # не включать ни в общий архив, ни в личные ZIP.
+            # Получить requester_id из стабильного локального owner identity,
+            # а не из имени участника или случайного значения на каждый запуск.
+            # Для каждой записи выполнить classify_chat и check_private_access.
+            # Сформировать отдельный временный ZIP на каждый разрешённый chat_id.
+            # Передать общий архив и private ZIP в существующий MediaStore flow
+            # как отдельные файлы в Download/YJ-64; каждый файл проверить readback.
+            self.persistent_core.export_archive(temp_path)
+            from jnius import autoclass
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
 
 NEW FRAGMENT END
 
----
+IMPLEMENTATION GATES:
 
+1. Сначала определить стабильный локальный owner_id и способ его восстановления.
+2. Привязать Participant 1/2/3 private histories к отдельным chat_id;
+   нельзя подменять user_id именем модели.
+3. Проверить, что публикация последнего обмена в общий чат не копирует
+   личную историю целиком и не меняет исходную приватную запись.
+4. Проверить повторный экспорт, совпадающие временные метки, повреждённый
+   JSON, отсутствующие метаданные, чужой requester_id и ошибку MediaStore.
+5. Не менять файлы рабочего приложения до отдельного согласования
+   переноса патчей с операционного стола.
+
+---
+ 
 ============================================================
 РАЗДЕЛ 5. КОНЕЦ ОПЕРАЦИОННОГО СТОЛА
 
