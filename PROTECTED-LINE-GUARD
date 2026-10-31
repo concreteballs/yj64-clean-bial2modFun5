@@ -342,28 +342,36 @@ PURPOSE:
 
 ORIGINAL FRAGMENT BEGIN
 
+    def _auto_export_download_archive(self, *_: Any) -> None:
+        """Create a verified archive in public Downloads/YJ-64 without opening a picker."""
+        temp_path = Path(self.user_data_dir) / "YJ-64-backup-auto.zip"
+        verify_path = Path(self.user_data_dir) / "YJ-64-backup-auto-verify.zip"
+        uri = None
+        try:
             self._save_common_history()
             self.persistent_core.export_archive(temp_path)
             from jnius import autoclass
-            PythonActivity = autoclass("org.kivy.android.PythonActivity")
 
 ORIGINAL FRAGMENT END
 
 NEW FRAGMENT BEGIN
 
+    def _auto_export_download_archive(self, *_: Any) -> None:
+        """Create a verified archive in public Downloads/YJ-64 without opening a picker."""
+        temp_path = Path(self.user_data_dir) / "YJ-64-backup-auto.zip"
+        verify_path = Path(self.user_data_dir) / "YJ-64-backup-auto-verify.zip"
+        uri = None
+        try:
             self._save_common_history()
-            # Перед экспортом собрать private chat records из workspace.histories_dir
-            # и соответствующих sidecar metadata; неизвестные/неполные записи
-            # не включать ни в общий архив, ни в личные ZIP.
-            # Получить requester_id из стабильного локального owner identity,
-            # а не из имени участника или случайного значения на каждый запуск.
-            # Для каждой записи выполнить classify_chat и check_private_access.
-            # Сформировать отдельный временный ZIP на каждый разрешённый chat_id.
-            # Передать общий архив и private ZIP в существующий MediaStore flow
-            # как отдельные файлы в Download/YJ-64; каждый файл проверить readback.
+            # Собрать private chat records из histories/*.json и sidecar metadata.
+            # Неизвестные/неполные записи исключить из обоих типов экспорта.
+            # requester_id получить из стабильного локального owner identity.
+            # Для каждой записи проверить classify_chat и check_private_access.
+            # Создать отдельный временный ZIP на каждый разрешённый chat_id.
+            # Каждый личный ZIP опубликовать отдельной записью MediaStore
+            # в Download/YJ-64 и проверить readback так же, как общий ZIP.
             self.persistent_core.export_archive(temp_path)
             from jnius import autoclass
-            PythonActivity = autoclass("org.kivy.android.PythonActivity")
 
 NEW FRAGMENT END
 
