@@ -459,8 +459,9 @@ def validate_archive_system():
 
 Контрольные значения — Git blob SHA-1.
 
-EXPECTED-GIT-BLOB-SHA:main.py=1c554079700a950c24a91dd1a63246912a90eed2
-EXPECTED-GIT-BLOB-SHA:chat_workspace.py=a69bd79e619bfccf79eb596ed7a9f7bbe0bf0c39
+EXPECTED-GIT-BLOB-SHA:main.py=bf7bfffb6e0063ce09690c32146280c368b3cac8
+EXPECTED-GIT-BLOB-SHA:chat_workspace.py=41201f85eeb892be09dd22c8b838e0195ba0cc1b
+EXPECTED-GIT-BLOB-SHA:yj64_persistent_core.py=b3651dc053ee29ed099483cde2624bf7c87b72a4
 EXPECTED-GIT-BLOB-SHA:buildozer.spec=974e7ac426db7973ff4feddbcc37c477319df750
 
 После каждого согласованного переноса изменения в рабочие файлы
@@ -1170,3 +1171,30 @@ VALIDATION REQUIRED BEFORE BUILD
 
 NOTE: this is a new implementation patch. No working files have been changed yet.
 ============================================================
+
+
+IMPLEMENTATION RECORD — YJ64-PRIVATE-CHAT-ARCHIVE-001
+APPROVED BY OWNER: 2026-10-31
+WORKING FILES UPDATED ON APPROVED BRANCH:
+- yj64_persistent_core.py — blob b3651dc053ee29ed099483cde2624bf7c87b72a4
+- main.py — blob bf7bfffb6e0063ce09690c32146280c368b3cac8
+- chat_workspace.py — blob 41201f85eeb892be09dd22c8b838e0195ba0cc1b
+
+IMPLEMENTED:
+1. Common archive collection excludes yj64-workspace/histories/**.
+2. Existing accumulated common archive state removes legacy histories/** entries before writing the next common archive.
+3. PersistentCore.export_private_archives() creates separate ZIP files grouped by participant from named private histories and agent private_messages; source files are not mutated.
+4. Private ZIPs include a schema/participant manifest and SHA-256/size metadata, and are checked with ZIP integrity and member-list validation before acceptance.
+5. Main automatic export creates the common archive and all private archives, publishes each to Download/YJ-64 using MediaStore, reads each published file back and verifies byte count, SHA-256 and ZIP integrity.
+6. Each archive publication reports success or failure independently; batch PASS is withheld if any archive failed.
+7. New agent private messages receive message_id, timestamp, timestamp_ms, session_id, participant_id and message_type metadata.
+8. Private archives are plaintext ZIPs. Cryptographic encryption/key management is NOT implemented.
+
+KNOWN LIMITATIONS / REQUIRED FOLLOW-UP:
+- Private ZIP restore is not yet wired into the archive picker; common importer must not be used for private ZIPs. A separate explicit, identity-checked restore flow remains required.
+- Existing legacy private agent messages retain their original fields; exporter preserves them without fabricating historical IDs/timestamps.
+- Validate grouping for agents whose runner values differ from canonical participant labels.
+- Device-level MediaStore operation, file-manager visibility and failure paths require Android runtime testing.
+- Private archive ZIPs group histories by filename and agent records by runner. This is not encryption or an access-control boundary after a user copies the ZIP.
+
+STATUS: WORKING FILES UPDATED; GUARD VALIDATION AND TESTS PENDING.
