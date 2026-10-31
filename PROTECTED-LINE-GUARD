@@ -639,9 +639,9 @@ Q-003:
 
 Контрольные значения — Git blob SHA-1.
 
-EXPECTED-GIT-BLOB-SHA:main.py=7f2e66262da5ce3d9abdf0d7db3f9eb2359c183f
+EXPECTED-GIT-BLOB-SHA:main.py=95a1c222f162d46a6cc2af1e442dfeb9114126e0
 EXPECTED-GIT-BLOB-SHA:chat_workspace.py=a69bd79e619bfccf79eb596ed7a9f7bbe0bf0c39
-EXPECTED-GIT-BLOB-SHA:llm_api.py=6eac9b76ebdcd95ccdeb103242d0a6d423311f0e
+EXPECTED-GIT-BLOB-SHA:llm_api.py=37c0708b118ad496ed8fbf9663f0d301993ed3c6
 EXPECTED-GIT-BLOB-SHA:buildozer.spec=f937a18d10eb6efc3a284f6ea907dd460d482451
 
 После каждого согласованного переноса изменения в рабочие файлы
