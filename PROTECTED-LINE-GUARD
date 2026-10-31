@@ -56,27 +56,10 @@ FILE: main.py BEGIN ALLOWED
 END ALLOWED
 
 FILE: main.py BEGIN ALLOWED
-        except Exception as exc:
-            self._archive_auto_export_error = f"{type(exc).__name__}: {exc}"
-            self.status.text = (
-                "Автосохранение архива не удалось: "
-                + self._archive_auto_export_error
-            )
-            self._append_report(
-                "memory_archive_auto_download_failed",
-                error_type=type(exc).__name__,
-                error=str(exc),
-                location="Download/YJ-64",
-            )
-            if uri is not None:
-                try:
-                    from jnius import autoclass
-                    PythonActivity = autoclass("org.kivy.android.PythonActivity")
-                    PythonActivity.mActivity.getContentResolver().delete(
-                        uri, None, None
-                    )
-                except Exception:
-                    pass
+            self._append_report("memory_archive_batch_completed",
+                                successful=len(results), failed=len(failures),
+                                results=results, failures=failures,
+                                all_archives_verified=bool(results) and not failures)
 END ALLOWED
 
 FILE: chat_workspace.py BEGIN ALLOWED
