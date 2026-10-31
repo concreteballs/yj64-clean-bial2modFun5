@@ -213,6 +213,12 @@ class YJ64BaseApp(App):
 
         self.message_distributor = MessageDistributor()
         self.workspace = ChatWorkspace(self.user_data_dir)
+        self.restored_context_path = self.workspace.root / "restored-model-context.json"
+        restored = ChatWorkspace._read_json(self.restored_context_path, [])
+        self.restored_context_history = (
+            [dict(item) for item in restored if isinstance(item, dict)]
+            if isinstance(restored, list) else []
+        )
         chats = self.workspace.list_chats()
         self.current_chat_id = str(chats[0]["id"])
         self.common_history: list[dict[str, str]] = self.workspace.load_messages(self.current_chat_id)
@@ -446,23 +452,30 @@ class YJ64BaseApp(App):
         content.add_widget(Label(text="Размер шрифта сообщений (10–24 sp)", size_hint_y=None, height=32))
         font_input = TextInput(text=str(self.chat_font_size), multiline=False, input_filter="int", size_hint_y=None, height=44)
         content.add_widget(font_input)
-        fields = {}
-        for participant in ("Participant 1", "Participant 2", "Participant 3"):
-            field = TextInput(text=str(self.participant_display_names.get(participant, "")), hint_text=f"Имя: {participant}", multiline=False, size_hint_y=None, height=44)
-            content.add_widget(field); fields[participant] = field
-        popup = Popup(title="НАСТРОЙКИ ЧАТА", content=content, size_hint=(0.92, 0.82), auto_dismiss=False)
+        popup = Popup(title="НАСТРОЙКИ ЧАТА", content=content, size_hint=(0.92, 0.48), auto_dismiss=False)
+
         def save(*_args):
-            try: size = max(10, min(24, int(font_input.text or "14")))
-            except ValueError: size = 14
-            names = {key: value.text.strip()[:32] for key, value in fields.items()}
+            try:
+                size = max(10, min(24, int(font_input.text or "14")))
+            except ValueError:
+                size = 14
+            names = dict(self.participant_display_names)
             settings = {"font_size": size, "participant_names": names}
             self.chat_ui_settings_path.parent.mkdir(parents=True, exist_ok=True)
             self.chat_ui_settings_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
-            self.chat_ui_settings = settings; self.chat_font_size = size; self.participant_display_names = names
-            self.chat_output.message_font_size = size; self.chat_output.text = self._render_history()
-            popup.dismiss(); self._append_report("chat_appearance_settings_saved", font_size=size)
-        save_button = FeedbackButton(text="СОХРАНИТЬ", size_hint_y=None, height=46); save_button.bind(on_release=save); content.add_widget(save_button)
-        close = FeedbackButton(text="ЗАКРЫТЬ", size_hint_y=None, height=40); close.bind(on_release=lambda *_: popup.dismiss()); content.add_widget(close)
+            self.chat_ui_settings = settings
+            self.chat_font_size = size
+            self.chat_output.message_font_size = size
+            self.chat_output.text = self._render_history()
+            popup.dismiss()
+            self._append_report("chat_appearance_settings_saved", font_size=size)
+
+        save_button = FeedbackButton(text="СОХРАНИТЬ", size_hint_y=None, height=46)
+        save_button.bind(on_release=save)
+        content.add_widget(save_button)
+        close = FeedbackButton(text="ЗАКРЫТЬ", size_hint_y=None, height=40)
+        close.bind(on_release=lambda *_: popup.dismiss())
+        content.add_widget(close)
         popup.open()
 
     def _offer_archive_restore(self, *_: Any) -> None:
@@ -709,15 +722,65 @@ class YJ64BaseApp(App):
                 count = self.persistent_core.import_archive(temp_path)
                 from chat_workspace import ChatWorkspace
                 self.workspace = ChatWorkspace(self.user_data_dir)
-                chats = self.workspace.list_chats()
-                if chats:
-                    self.current_chat_id = str(chats[0]["id"])
-                    self.common_history = self.workspace.load_messages(self.current_chat_id)
-                    if hasattr(self, "chat_output"):
-                        self.chat_output.text = self._render_history()
+
+                # Merge previously restored memory with every archived common chat.
+                restored_context = []
+                previous = ChatWorkspace._read_json(
+                    self.workspace.root / "restored-model-context.json", []
+                )
+                if isinstance(previous, list):
+                    restored_context.extend(item for item in previous if isinstance(item, dict))
+                for chat in self.workspace.list_chats():
+                    chat_id = str(chat.get("id", "")).strip()
+                    if chat_id:
+                        restored_context.extend(
+                            dict(item) for item in self.workspace.load_messages(chat_id)
+                            if isinstance(item, dict)
+                        )
+
+                unique_context = {}
+                for item in restored_context:
+                    role = str(item.get("role", "")).lower()
+                    if role not in ("user", "assistant") or not str(item.get("content", "")).strip():
+                        continue
+                    message_id = str(item.get("message_id", "")).strip()
+                    if not message_id:
+                        message_id = "legacy:" + hashlib.sha256(
+                            json.dumps(item, ensure_ascii=False, sort_keys=True).encode("utf-8")
+                        ).hexdigest()
+                    unique_context[message_id] = dict(item)
+                restored_context = list(unique_context.values())
+
+                def _context_timestamp(item):
+                    value = item.get("timestamp", item.get("timestamp_ms", 0)) or 0
+                    try:
+                        return float(value)
+                    except (TypeError, ValueError):
+                        return 0.0
+
+                restored_context.sort(key=lambda item: (_context_timestamp(item), str(item.get("message_id", ""))))
+                context_path = self.workspace.root / "restored-model-context.json"
+                self.workspace._write_json(context_path, restored_context)
+                self.restored_context_path = context_path
+                self.restored_context_history = restored_context
+
+                self.current_chat_id = self.workspace.create_chat("Новый чат после восстановления памяти")
+                self.common_history = []
                 self.private_histories = {}
-                self.status.text = f"Архив восстановлен: {count} событий. Перезапусти приложение, если часть экранов ещё показывает старые данные."
-                self._append_report("memory_archive_import_succeeded", event_count=count, archive=str(uri), size_bytes=copied_bytes)
+                if hasattr(self, "chat_output"):
+                    self.chat_output.text = self._render_history()
+                self.status.text = (
+                    f"Память восстановлена: {len(restored_context)} сообщений. "
+                    "Она доступна моделям отдельно от текущего чата."
+                )
+                self._append_report(
+                    "memory_archive_import_succeeded",
+                    event_count=count,
+                    restored_context_count=len(restored_context),
+                    visible_chat_history_count=0,
+                    archive=str(uri),
+                    size_bytes=copied_bytes,
+                )
                 try:
                     self._archive_restore_prompt_path.write_text(
                         json.dumps({"prompted": True, "restored": True, "timestamp_ms": int(time.time() * 1000)}),
@@ -836,6 +899,9 @@ class YJ64BaseApp(App):
             self._refresh_discussion_button()
 
     def _participant_label(self, participant_name: str) -> str:
+        custom_name = self._participant_display_name(participant_name)
+        if custom_name != participant_name:
+            return custom_name
         index = int(participant_name.rsplit(" ", 1)[-1]) - 1
         labels = {
             "ru": ("Участник 1", "Участник 2", "Участник 3"),
@@ -1201,7 +1267,23 @@ class YJ64BaseApp(App):
         self._append_report("live_media_placeholder_opened", capture_started=False, streaming_started=False)
 
     def _open_remote_participant(self, *_: Any) -> None:
-        from remote_participant import RemoteParticipantClient
+        try:
+            from remote_participant import RemoteParticipantClient
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            self._append_report("remote_participant_module_load_failed", error=error, module="remote_participant")
+            self.status.text = "Модуль удалённого участника пока недоступен: " + error
+            content = BoxLayout(orientation="vertical", spacing=10, padding=12)
+            content.add_widget(Label(text=(
+                "Модуль REMOTE DEVICE / ADMIN MODULE не удалось загрузить.\\n\\n"
+                + error + "\\n\\nПриложение продолжает работу."
+            )))
+            close = FeedbackButton(text="ЗАКРЫТЬ", size_hint_y=None, height=48)
+            popup = Popup(title="MODULE — ОШИБКА ЗАГРУЗКИ", content=content, size_hint=(0.92, 0.48))
+            close.bind(on_release=lambda *_: popup.dismiss())
+            content.add_widget(close)
+            popup.open()
+            return
 
         if not hasattr(self, "remote_participant_client"):
             self.remote_participant_client = RemoteParticipantClient(
@@ -1796,6 +1878,44 @@ class YJ64BaseApp(App):
             button.color = (1,1,1,1) if verified else (0.10,0.20,0.30,1)
             button.text = self._participant_label(name)
 
+    def _rename_participant(self, participant_name: str) -> None:
+        content = BoxLayout(orientation="vertical", spacing=10, padding=12)
+        current_name = self._participant_display_name(participant_name)
+        field = TextInput(text="" if current_name == participant_name else current_name,
+                          hint_text="Введите новое имя участника", multiline=False,
+                          size_hint_y=None, height=48)
+        content.add_widget(field)
+        popup = Popup(title="ПЕРЕИМЕНОВАНИЕ УЧАСТНИКА", content=content, size_hint=(0.9, 0.38))
+
+        def save(*_):
+            new_name = field.text.strip()[:32] or participant_name
+            names = dict(self.participant_display_names)
+            names[participant_name] = new_name
+            settings = dict(self.chat_ui_settings)
+            settings["participant_names"] = names
+            try:
+                self.chat_ui_settings_path.parent.mkdir(parents=True, exist_ok=True)
+                self.chat_ui_settings_path.write_text(
+                    json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            except OSError as exc:
+                self.status.text = "Не удалось сохранить имя: " + str(exc)
+                return
+            self.chat_ui_settings = settings
+            self.participant_display_names = names
+            self._refresh_participant_buttons()
+            self.chat_output.text = self._render_history()
+            popup.dismiss()
+            self._append_report("participant_renamed", participant_id=participant_name, display_name=new_name)
+
+        save_button = FeedbackButton(text="СОХРАНИТЬ", size_hint_y=None, height=46)
+        save_button.bind(on_release=save)
+        content.add_widget(save_button)
+        close_button = FeedbackButton(text="ОТМЕНА", size_hint_y=None, height=42)
+        close_button.bind(on_release=lambda *_: popup.dismiss())
+        content.add_widget(close_button)
+        popup.open()
+
     def _open_participant_menu(self, participant_name: str) -> None:
         status = self._participant_config_status(participant_name)
         self._append_report(
@@ -1821,6 +1941,10 @@ class YJ64BaseApp(App):
         )
         title.bind(size=lambda widget, value: setattr(widget, "text_size", (max(1, value[0]-12), max(1, value[1]-8))))
         content.add_widget(title)
+
+        rename_button = FeedbackButton(text="ПЕРЕИМЕНОВАТЬ УЧАСТНИКА", size_hint_y=None, height=50)
+        rename_button.bind(on_release=lambda *_: (popup.dismiss(), self._rename_participant(participant_name)))
+        content.add_widget(rename_button)
 
         write_button = FeedbackButton(text="WRITE / GET ANSWER", size_hint_y=None, height=56)
         write_button.bind(
@@ -1966,7 +2090,7 @@ class YJ64BaseApp(App):
             prompt.text = ""
             send.disabled = True
             output.text += f"\n\nYou: {message}\n\nSending privately..."
-            common_context = list(self.common_history)
+            common_context = list(self.restored_context_history) + list(self.common_history)
             private_context = list(self.private_histories.get(participant_name, []))
             request_message = self._practical_instructions(message)
             request_history = common_context + private_context + [
@@ -2837,9 +2961,10 @@ class YJ64BaseApp(App):
                             "Add your next contribution without repeating the whole conversation."
                         )
 
-                        # Exclude the target participant's own prior answers from its context.
+                        # Restored archive memory is model input only, never visible chat history.
                         history_snapshot = []
-                        for item in self.common_history:
+                        source_history = list(self.restored_context_history) + list(self.common_history)
+                        for item in source_history:
                             content = str(item.get("content") or "")
                             if item.get("role") == "assistant" and content.startswith(name + ":"):
                                 continue
