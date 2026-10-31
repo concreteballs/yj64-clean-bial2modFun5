@@ -923,6 +923,32 @@ class PermissionDenied(PermissionError):
 
 
 class PermissionManager:
+    @classmethod
+    def load_or_create_owner_id(cls, user_data_dir: str | Path) -> str:
+        identity_path = (
+            Path(user_data_dir) / "yj64-workspace" / "owner-identity.json"
+        )
+        identity_path.parent.mkdir(parents=True, exist_ok=True)
+        if identity_path.exists():
+            try:
+                value = json.loads(identity_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError) as exc:
+                raise IOError("Owner identity is unreadable; refusing to replace it") from exc
+            owner_id = str(value.get("owner_id") or "").strip() if isinstance(value, dict) else ""
+            if not owner_id or value.get("schema") != "yj64.owner-identity.v1":
+                raise IOError("Owner identity has an invalid schema")
+            return owner_id
+        owner_id = uuid.uuid4().hex
+        cls._atomic_write(
+            identity_path,
+            json.dumps(
+                {"schema": "yj64.owner-identity.v1", "owner_id": owner_id},
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
+        return owner_id
+
     ACTIONS = frozenset({
         "read", "write", "commit", "build", "publish", "service_management"
     })
@@ -1194,6 +1220,12 @@ class PermissionManagerTests(unittest.TestCase):
         }
         values.update(overrides)
         return self.manager.issue_grant(**values)
+
+    def test_owner_identity_is_stable(self):
+        first = PermissionManager.load_or_create_owner_id(self.temp.name)
+        second = PermissionManager.load_or_create_owner_id(self.temp.name)
+        self.assertEqual(first, second)
+        self.assertTrue(first)
 
     def test_default_deny(self):
         with self.assertRaises(PermissionDenied):
