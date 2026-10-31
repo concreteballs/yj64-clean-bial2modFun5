@@ -216,6 +216,12 @@ class YJ64BaseApp(App):
         chats = self.workspace.list_chats()
         self.current_chat_id = str(chats[0]["id"])
         self.common_history: list[dict[str, str]] = self.workspace.load_messages(self.current_chat_id)
+        self.model_context_path = Path(self.user_data_dir) / "yj64-workspace" / "model-context-history.json"
+        try:
+            stored_context = json.loads(self.model_context_path.read_text(encoding="utf-8"))
+            self.model_context_history = stored_context if isinstance(stored_context, list) else []
+        except (OSError, ValueError, TypeError):
+            self.model_context_history = []
         self.private_histories: dict[str, list[dict[str, str]]] = {}
         self.practical_mode = False
         self.critique_mode = False
@@ -712,7 +718,16 @@ class YJ64BaseApp(App):
                 chats = self.workspace.list_chats()
                 if chats:
                     self.current_chat_id = str(chats[0]["id"])
-                    self.common_history = self.workspace.load_messages(self.current_chat_id)
+                    restored_context = self.workspace.load_messages(self.current_chat_id)
+                    self.model_context_history = restored_context
+                    self.model_context_path = Path(self.user_data_dir) / "yj64-workspace" / "model-context-history.json"
+                    self.model_context_path.parent.mkdir(parents=True, exist_ok=True)
+                    self.model_context_path.write_text(
+                        json.dumps(self.model_context_history, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    self.workspace.save_messages(self.current_chat_id, [])
+                    self.common_history = []
                     if hasattr(self, "chat_output"):
                         self.chat_output.text = self._render_history()
                 self.private_histories = {}
@@ -1966,10 +1981,9 @@ class YJ64BaseApp(App):
             prompt.text = ""
             send.disabled = True
             output.text += f"\n\nYou: {message}\n\nSending privately..."
-            common_context = list(self.common_history)
             private_context = list(self.private_histories.get(participant_name, []))
             request_message = self._practical_instructions(message)
-            request_history = common_context + private_context + [
+            request_history = private_context + [
                 {"role": "user", "content": request_message}
             ]
             self._append_report(
@@ -1980,7 +1994,7 @@ class YJ64BaseApp(App):
                 prompt=message,
                 provider=status["provider"],
                 model=status["model"],
-                common_history_count=len(common_context),
+                common_history_count=0,
                 private_history_count=len(private_context),
             )
 
@@ -2837,9 +2851,10 @@ class YJ64BaseApp(App):
                             "Add your next contribution without repeating the whole conversation."
                         )
 
-                        # Exclude the target participant's own prior answers from its context.
+                        # Keep restored archive context available to models without showing it
+                        # in the new common-chat transcript.
                         history_snapshot = []
-                        for item in self.common_history:
+                        for item in self.model_context_history + self.common_history:
                             content = str(item.get("content") or "")
                             if item.get("role") == "assistant" and content.startswith(name + ":"):
                                 continue
