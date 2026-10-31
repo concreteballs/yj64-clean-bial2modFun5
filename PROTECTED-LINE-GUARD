@@ -880,3 +880,406 @@ TESTS:
 ============================================================
 КОНЕЦ PROTECTED-LINE-GUARD
 
+
+
+---
+
+PATCH-ID: Q003-B-PERMISSION-MANAGER-001
+
+TARGET FILE: permission_manager.py
+
+PURPOSE:
+
+Создать единый локальный Permission Manager с политикой Default Deny,
+временными разрешениями, немедленным отзывом и аудитом. Этот модуль —
+первый исполняемый компонент Q-003-B; сам по себе он не считается
+полной интеграцией до подключения проверок к каждой операции приложения.
+
+ORIGINAL FRAGMENT BEGIN
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+"""Default-deny permission policy for YJ-64 local operations.
+
+This is an application policy layer, not an OS security boundary. Code
+running with the same process privileges must not be treated as hostile
+sandboxed code.
+"""
+from __future__ import annotations
+
+import json
+import os
+import threading
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+
+class PermissionDenied(PermissionError):
+    """Raised when an operation has no currently valid grant."""
+
+
+class PermissionManager:
+    ACTIONS = frozenset({
+        "read", "write", "commit", "build", "publish", "service_management"
+    })
+    SCHEMA = "yj64.permissions.v1"
+
+    def __init__(
+        self,
+        user_data_dir: str | Path,
+        owner_id: str,
+        *,
+        clock=time.time,
+    ) -> None:
+        self.root = Path(user_data_dir) / "yj64-workspace"
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.path = self.root / "permissions.json"
+        self.audit_path = self.root / "permission-audit.jsonl"
+        self.owner_id = str(owner_id).strip()
+        if not self.owner_id:
+            raise ValueError("owner_id is required")
+        self._clock = clock
+        self._lock = threading.RLock()
+        self._state = self._load()
+
+    @staticmethod
+    def _atomic_write(path: Path, payload: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+        try:
+            with temp.open("w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, path)
+        finally:
+            temp.unlink(missing_ok=True)
+
+    def _load(self) -> dict[str, Any]:
+        if not self.path.exists():
+            return {"schema": self.SCHEMA, "grants": []}
+        try:
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as exc:
+            raise IOError("Permission store is unreadable; refusing access") from exc
+        if (
+            not isinstance(value, dict)
+            or value.get("schema") != self.SCHEMA
+            or not isinstance(value.get("grants"), list)
+        ):
+            raise IOError("Permission store has an invalid schema; refusing access")
+        return value
+
+    def _save(self) -> None:
+        self._atomic_write(
+            self.path, json.dumps(self._state, ensure_ascii=False, indent=2)
+        )
+
+    def _audit(
+        self, decision: str, *, subject_id: str, resource: str,
+        action: str, reason: str, grant_id: str | None = None,
+    ) -> None:
+        record = {
+            "schema": self.SCHEMA,
+            "timestamp_ms": int(self._clock() * 1000),
+            "decision": decision,
+            "subject_id": subject_id,
+            "resource": resource,
+            "action": action,
+            "reason": reason,
+            "grant_id": grant_id,
+        }
+        self.audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.audit_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    def issue_grant(
+        self,
+        *,
+        actor_id: str,
+        subject_id: str,
+        resource: str,
+        action: str,
+        ttl_seconds: int,
+        scope: str,
+    ) -> str:
+        actor = str(actor_id).strip()
+        subject = str(subject_id).strip()
+        resource_key = str(resource).strip()
+        scope_key = str(scope).strip()
+        if actor != self.owner_id:
+            raise PermissionDenied("Only the owner may issue a grant")
+        if not subject or not resource_key or not scope_key:
+            raise ValueError("subject_id, resource and scope are required")
+        if action not in self.ACTIONS:
+            raise ValueError("Unsupported permission action")
+        if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int):
+            raise ValueError("ttl_seconds must be an integer")
+        if ttl_seconds <= 0 or ttl_seconds > 31 * 24 * 60 * 60:
+            raise ValueError("ttl_seconds must be between 1 second and 31 days")
+        now = self._clock()
+        grant = {
+            "grant_id": uuid.uuid4().hex,
+            "subject_id": subject,
+            "resource": resource_key,
+            "action": action,
+            "scope": scope_key,
+            "created_by": actor,
+            "created_at": now,
+            "expires_at": now + ttl_seconds,
+            "revoked_at": None,
+        }
+        with self._lock:
+            self._state["grants"].append(grant)
+            self._save()
+            self._audit(
+                "grant_issued", subject_id=subject, resource=resource_key,
+                action=action, reason="owner_grant", grant_id=grant["grant_id"],
+            )
+        return grant["grant_id"]
+
+    def revoke_grant(self, *, actor_id: str, grant_id: str) -> bool:
+        if str(actor_id).strip() != self.owner_id:
+            raise PermissionDenied("Only the owner may revoke a grant")
+        with self._lock:
+            for grant in self._state["grants"]:
+                if grant.get("grant_id") == str(grant_id) and grant.get("revoked_at") is None:
+                    grant["revoked_at"] = self._clock()
+                    self._save()
+                    self._audit(
+                        "grant_revoked",
+                        subject_id=str(grant.get("subject_id") or ""),
+                        resource=str(grant.get("resource") or ""),
+                        action=str(grant.get("action") or ""),
+                        reason="owner_revocation",
+                        grant_id=str(grant_id),
+                    )
+                    return True
+        return False
+
+    def check(
+        self,
+        *,
+        requester_id: str,
+        resource: str,
+        action: str,
+        scope: str,
+    ) -> bool:
+        subject = str(requester_id).strip()
+        resource_key = str(resource).strip()
+        scope_key = str(scope).strip()
+        if not subject or not resource_key or not scope_key or action not in self.ACTIONS:
+            self._audit(
+                "deny", subject_id=subject, resource=resource_key,
+                action=str(action), reason="invalid_request",
+            )
+            raise PermissionDenied("Invalid or incomplete permission request")
+        now = self._clock()
+        with self._lock:
+            matches = [
+                grant for grant in self._state["grants"]
+                if grant.get("subject_id") == subject
+                and grant.get("resource") == resource_key
+                and grant.get("action") == action
+                and grant.get("scope") == scope_key
+                and grant.get("revoked_at") is None
+                and isinstance(grant.get("expires_at"), (int, float))
+                and now < grant["expires_at"]
+            ]
+            if not matches:
+                self._audit(
+                    "deny", subject_id=subject, resource=resource_key,
+                    action=action, reason="no_active_matching_grant",
+                )
+                raise PermissionDenied(
+                    f"Denied {action} on {resource_key}: no active grant"
+                )
+            selected = max(matches, key=lambda item: float(item["expires_at"]))
+            self._audit(
+                "allow", subject_id=subject, resource=resource_key,
+                action=action, reason="active_grant",
+                grant_id=str(selected["grant_id"]),
+            )
+            return True
+
+    def require(self, **request: Any) -> None:
+        self.check(**request)
+
+    def list_active_grants(self, *, actor_id: str) -> list[dict[str, Any]]:
+        if str(actor_id).strip() != self.owner_id:
+            raise PermissionDenied("Only the owner may inspect grants")
+        now = self._clock()
+        with self._lock:
+            return [
+                dict(grant) for grant in self._state["grants"]
+                if grant.get("revoked_at") is None
+                and isinstance(grant.get("expires_at"), (int, float))
+                and now < grant["expires_at"]
+            ]
+
+
+NEW FRAGMENT END
+
+TESTS:
+
+1. Без grant любой read/write/commit/build/publish/service_management запрещён.
+2. Grant для другого subject/resource/action/scope не подходит.
+3. Истёкший grant немедленно перестаёт действовать.
+4. Отозванный grant немедленно перестаёт действовать.
+5. Не-владелец не может выдать, отозвать или просмотреть grants.
+6. Повреждённый permissions.json приводит к отказу, а не к пустой
+   политике с разрешениями.
+7. Аудит содержит решения и причины, но не содержит содержимого чатов,
+   API-ключей или токенов.
+
+IMPLEMENTATION GATE:
+
+До интеграции этот модуль не должен использоваться как доказательство
+защиты приложения. Следующий патч обязан подключить один экземпляр
+PermissionManager к фактическим точкам чтения/записи/экспорта/восстановления,
+агентским действиям, commit/build/publish и IPC; UI-кнопки не заменяют
+проверки непосредственно перед операцией.
+
+---
+
+PATCH-ID: Q003-B-PERMISSION-MANAGER-TESTS-001
+
+TARGET FILE: tests/test_permission_manager.py
+
+PURPOSE:
+
+Добавить регрессионные тесты default-deny, изоляции grants, срока действия,
+отзыва и аудита Permission Manager.
+
+ORIGINAL FRAGMENT BEGIN
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from permission_manager import PermissionDenied, PermissionManager
+
+
+class PermissionManagerTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.now = [1000.0]
+        self.owner = "owner-local-1"
+        self.manager = PermissionManager(
+            self.temp.name, self.owner, clock=lambda: self.now[0]
+        )
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def grant(self, **overrides):
+        values = {
+            "actor_id": self.owner,
+            "subject_id": "participant-1",
+            "resource": "private-chat:chat-1",
+            "action": "read",
+            "ttl_seconds": 60,
+            "scope": "chat-1",
+        }
+        values.update(overrides)
+        return self.manager.issue_grant(**values)
+
+    def test_default_deny(self):
+        with self.assertRaises(PermissionDenied):
+            self.manager.require(
+                requester_id="participant-1",
+                resource="private-chat:chat-1",
+                action="read",
+                scope="chat-1",
+            )
+
+    def test_exact_scope_is_required(self):
+        self.grant()
+        with self.assertRaises(PermissionDenied):
+            self.manager.require(
+                requester_id="participant-1",
+                resource="private-chat:chat-1",
+                action="read",
+                scope="chat-2",
+            )
+
+    def test_expired_grant_is_denied(self):
+        self.grant()
+        self.now[0] += 61
+        with self.assertRaises(PermissionDenied):
+            self.manager.require(
+                requester_id="participant-1",
+                resource="private-chat:chat-1",
+                action="read",
+                scope="chat-1",
+            )
+
+    def test_revocation_is_immediate(self):
+        grant_id = self.grant()
+        self.assertTrue(self.manager.revoke_grant(
+            actor_id=self.owner, grant_id=grant_id
+        ))
+        with self.assertRaises(PermissionDenied):
+            self.manager.require(
+                requester_id="participant-1",
+                resource="private-chat:chat-1",
+                action="read",
+                scope="chat-1",
+            )
+
+    def test_non_owner_cannot_issue_or_revoke(self):
+        with self.assertRaises(PermissionDenied):
+            self.grant(actor_id="participant-1")
+        grant_id = self.grant()
+        with self.assertRaises(PermissionDenied):
+            self.manager.revoke_grant(
+                actor_id="participant-1", grant_id=grant_id
+            )
+
+    def test_different_subject_and_action_are_denied(self):
+        self.grant()
+        for subject, action in (("participant-2", "read"), ("participant-1", "write")):
+            with self.assertRaises(PermissionDenied):
+                self.manager.require(
+                    requester_id=subject,
+                    resource="private-chat:chat-1",
+                    action=action,
+                    scope="chat-1",
+                )
+
+    def test_corrupt_store_fails_closed(self):
+        self.manager.path.write_text("{broken", encoding="utf-8")
+        with self.assertRaises(IOError):
+            PermissionManager(self.temp.name, self.owner)
+
+    def test_audit_does_not_store_payload_or_secret(self):
+        self.grant()
+        self.manager.require(
+            requester_id="participant-1",
+            resource="private-chat:chat-1",
+            action="read",
+            scope="chat-1",
+        )
+        audit = self.manager.audit_path.read_text(encoding="utf-8")
+        self.assertNotIn("api_key", audit)
+        self.assertNotIn("private message body", audit)
+        records = [json.loads(line) for line in audit.splitlines()]
+        self.assertTrue(any(item["decision"] == "allow" for item in records))
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+NEW FRAGMENT END
+
