@@ -459,9 +459,9 @@ def validate_archive_system():
 
 Контрольные значения — Git blob SHA-1.
 
-EXPECTED-GIT-BLOB-SHA:main.py=bf7bfffb6e0063ce09690c32146280c368b3cac8
+EXPECTED-GIT-BLOB-SHA:main.py=b3651dc053ee29ed099483cde2624bf7c87b72a4
 EXPECTED-GIT-BLOB-SHA:chat_workspace.py=41201f85eeb892be09dd22c8b838e0195ba0cc1b
-EXPECTED-GIT-BLOB-SHA:yj64_persistent_core.py=b3651dc053ee29ed099483cde2624bf7c87b72a4
+EXPECTED-GIT-BLOB-SHA:yj64_persistent_core.py=bf7bfffb6e0063ce09690c32146280c368b3cac8
 EXPECTED-GIT-BLOB-SHA:buildozer.spec=974e7ac426db7973ff4feddbcc37c477319df750
 
 После каждого согласованного переноса изменения в рабочие файлы
@@ -1176,8 +1176,8 @@ NOTE: this is a new implementation patch. No working files have been changed yet
 IMPLEMENTATION RECORD — YJ64-PRIVATE-CHAT-ARCHIVE-001
 APPROVED BY OWNER: 2026-10-31
 WORKING FILES UPDATED ON APPROVED BRANCH:
-- yj64_persistent_core.py — blob b3651dc053ee29ed099483cde2624bf7c87b72a4
-- main.py — blob bf7bfffb6e0063ce09690c32146280c368b3cac8
+- yj64_persistent_core.py — blob bf7bfffb6e0063ce09690c32146280c368b3cac8
+- main.py — blob b3651dc053ee29ed099483cde2624bf7c87b72a4
 - chat_workspace.py — blob 41201f85eeb892be09dd22c8b838e0195ba0cc1b
 
 IMPLEMENTED:
