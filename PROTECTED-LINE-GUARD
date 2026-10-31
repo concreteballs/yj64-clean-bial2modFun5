@@ -389,6 +389,223 @@ IMPLEMENTATION GATES:
 
 ---
  
+---
+
+PATCH-ID: YJ64-PRIVATE-CHAT-REQUEST-001
+
+TARGET FILE: main.py
+
+PURPOSE:
+
+Изолировать историю каждого приватного чата. В API-запрос участника
+передавать только его private_history и новое сообщение. Общую историю
+не добавлять. Существующую публикацию явно выбранного последнего обмена
+в общий чат не менять.
+
+ORIGINAL FRAGMENT BEGIN
+
+            common_context = list(self.common_history)
+            private_context = list(self.private_histories.get(participant_name, []))
+            request_message = self._practical_instructions(message)
+            request_history = common_context + private_context + [
+                {"role": "user", "content": request_message}
+            ]
+            self._append_report(
+                "participant_request_started",
+                participant=participant_name,
+                route_id=route_id,
+                mode=mode,
+                prompt=message,
+                provider=status["provider"],
+                model=status["model"],
+                common_history_count=len(common_context),
+                private_history_count=len(private_context),
+            )
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+            private_context = list(self.private_histories.get(participant_name, []))
+            request_message = self._practical_instructions(message)
+            request_history = private_context + [
+                {"role": "user", "content": request_message}
+            ]
+            self._append_report(
+                "participant_request_started",
+                participant=participant_name,
+                route_id=route_id,
+                mode=mode,
+                prompt=message,
+                provider=status["provider"],
+                model=status["model"],
+                common_history_count=0,
+                private_history_count=len(private_context),
+            )
+
+NEW FRAGMENT END
+
+TESTS:
+
+1. Participant 1 получает только private_history Participant 1.
+2. Participant 2 получает только private_history Participant 2.
+3. Ни один приватный запрос не содержит common_history.
+4. Публикация последнего обмена остаётся отдельным явным действием;
+   публикация не переносит всю private_history.
+
+---
+
+PATCH-ID: YJ64-MISTRAL-INPUT-NORMALIZE-001
+
+TARGET FILE: llm_api.py
+
+PURPOSE:
+
+Передавать в Mistral Conversations API только допустимые поля сообщений.
+Локальные записи истории не изменять: очистка применяется исключительно
+к формируемому outbound payload.
+
+ORIGINAL FRAGMENT BEGIN
+
+            "inputs": history or [{"role": "user", "content": prompt}],
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+            "inputs": [
+                {
+                    "role": str(item.get("role") or "user").strip().lower(),
+                    "content": str(item.get("content") or ""),
+                }
+                for item in (history or [{"role": "user", "content": prompt}])
+                if (
+                    isinstance(item, dict)
+                    and str(item.get("role") or "user").strip().lower()
+                    in {"system", "user", "assistant"}
+                    and str(item.get("content") or "").strip()
+                )
+            ] or [{"role": "user", "content": prompt}],
+
+NEW FRAGMENT END
+
+TESTS:
+
+1. В inputs каждого сообщения присутствуют только role и content.
+2. message_id, timestamp, session_id и прочие локальные metadata не уходят в API.
+3. Допускаются только роли system, user, assistant; пустые сообщения пропускаются.
+4. Если после фильтрации список пуст, отправляется новое prompt-сообщение.
+5. Исходная локальная история и её metadata остаются неизменными.
+
+---
+
+PATCH-ID: YJ64-TRANSIENT-503-RETRY-001
+
+TARGET FILE: llm_api.py
+
+PURPOSE:
+
+Добавить одну ограниченную повторную попытку для временных HTTP 503 /
+UNAVAILABLE. Не менять существующую политику повторов HTTP 429.
+Не переключать запрос на другого участника или модель.
+
+ORIGINAL FRAGMENT BEGIN
+
+    # Retry the same participant request after rate limits; never fall back silently.
+    rate_attempt = 0
+    while True:
+        try:
+            data = _request("POST", url, headers, payload=payload)
+            break
+        except Exception as exc:
+            message = str(exc)
+            limited = bool(re.search(r"HTTP 429|rate.?limit|too many requests|tokens per minute|requests per minute", message, re.I))
+            if not limited or rate_attempt >= 3:
+                _report(
+                    report, "gateway_request_failed",
+                    operation_id=operation, route_id=selected_route,
+                    provider=provider, model=model, mode=selected_mode,
+                    api_method=api_method, endpoint=url,
+                    error_type=type(exc).__name__, error=message,
+                    rate_limit_retry_attempt=rate_attempt,
+                )
+                raise
+            rate_attempt += 1
+            match = re.search(r"Retry-After\s*[=:]\s*([0-9]+)", message, re.I)
+            wait_seconds = max(1, min(120, int(match.group(1)))) if match else min(60, 15 * rate_attempt)
+            _report(
+                report, "gateway_rate_limit_wait",
+                operation_id=operation, route_id=selected_route,
+                provider=provider, model=model, attempt=rate_attempt,
+                wait_seconds=wait_seconds, error=message[:500],
+            )
+            time.sleep(wait_seconds)
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+    # Retry the same participant request after transient failures; never fall back silently.
+    rate_attempt = 0
+    service_unavailable_attempt = 0
+    while True:
+        try:
+            data = _request("POST", url, headers, payload=payload)
+            break
+        except Exception as exc:
+            message = str(exc)
+            limited = bool(re.search(r"HTTP 429|rate.?limit|too many requests|tokens per minute|requests per minute", message, re.I))
+            unavailable = bool(re.search(
+                r"HTTP 503|service unavailable|temporarily unavailable|UNAVAILABLE",
+                message, re.I,
+            ))
+            if limited and rate_attempt < 3:
+                rate_attempt += 1
+                match = re.search(r"Retry-After\s*[=:]\s*([0-9]+)", message, re.I)
+                wait_seconds = max(1, min(120, int(match.group(1)))) if match else min(60, 15 * rate_attempt)
+                _report(
+                    report, "gateway_rate_limit_wait",
+                    operation_id=operation, route_id=selected_route,
+                    provider=provider, model=model, attempt=rate_attempt,
+                    wait_seconds=wait_seconds, error=message[:500],
+                )
+                time.sleep(wait_seconds)
+                continue
+            if unavailable and service_unavailable_attempt < 1:
+                service_unavailable_attempt += 1
+                wait_seconds = 20
+                _report(
+                    report, "gateway_service_unavailable_wait",
+                    operation_id=operation, route_id=selected_route,
+                    provider=provider, model=model,
+                    attempt=service_unavailable_attempt,
+                    wait_seconds=wait_seconds, error=message[:500],
+                )
+                time.sleep(wait_seconds)
+                continue
+            _report(
+                report, "gateway_request_failed",
+                operation_id=operation, route_id=selected_route,
+                provider=provider, model=model, mode=selected_mode,
+                api_method=api_method, endpoint=url,
+                error_type=type(exc).__name__, error=message,
+                rate_limit_retry_attempt=rate_attempt,
+                service_unavailable_retry_attempt=service_unavailable_attempt,
+            )
+            raise
+
+NEW FRAGMENT END
+
+TESTS:
+
+1. HTTP 503 / UNAVAILABLE: ровно одна повторная попытка после 20 секунд.
+2. HTTP 422: повторов нет.
+3. Ошибки авторизации и некорректного payload не повторяются.
+4. Существующие повторы HTTP 429 и обработка Retry-After сохраняются.
+5. Повтор всегда выполняется для того же route/provider/model.
+6. Ошибка после исчерпания попытки записывается в gateway_request_failed.
+
+
 ============================================================
 РАЗДЕЛ 5. КОНЕЦ ОПЕРАЦИОННОГО СТОЛА
 
