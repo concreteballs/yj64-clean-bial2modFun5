@@ -165,16 +165,140 @@ END ALLOWED
 
 ---
 
-PATCH-ID: YJ64-BUILD-001
+PATCH-ID: YJ64-PRIVATE-ARCHIVE-001
 
-STATUS: ALREADY APPLIED — EXCLUDED FROM TRANSFER
+TARGET FILE: yj64_persistent_core.py
 
-TARGET FILE: buildozer.spec
+PURPOSE:
 
-Текущая версия рабочего файла: 0.1.32.
+Разделить общий и личный архивы на уровне источника данных.
 
-Повторное повышение версии не требуется.
-Этот патч не должен переноситься в рабочий файл.
+1. Общий архив не включает yj64-workspace/histories/.
+2. История каждого участника сохраняется в отдельный ZIP.
+3. Личные ZIP размещаются только во внутреннем хранилище приложения
+   yj64-private-archives, не в Download и не в общем ZIP.
+4. Архив каждого участника содержит только его собственную историю.
+5. Существующие сообщения и файлы не удаляются и не переписываются.
+6. Существующие ранее созданные ZIP не сканируются и не изменяются.
+7. При повторном экспорте личный ZIP атомарно обновляется полной
+   текущей историей соответствующего участника.
+
+ORIGINAL FRAGMENT BEGIN
+
+    def _collect_files(self)->dict[str,bytes]:
+        result={}
+        for base in (self.workspace_path,self.report_path):
+            if base.is_file() and not base.is_symlink():items=[base]
+            elif base.is_dir() and not base.is_symlink():items=[p for p in base.rglob("*") if p.is_file() and not p.is_symlink()]
+            else:items=[]
+            for p in items:
+                name=p.relative_to(self.root).as_posix();data=p.read_bytes()
+                result[name]=self._sanitize_json(data) if p.suffix.lower()==".json" else data
+        for pattern in ("yj64-router-config.json","yj64-llm-config*.json"):
+            for p in self.root.glob(pattern):
+                if p.is_file() and not p.is_symlink():result[p.name]=self._sanitize_json(p.read_bytes())
+        return result
+    @staticmethod
+    def _merge_history
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+    def _collect_files(self)->dict[str,bytes]:
+        result={}
+        for base in (self.workspace_path,self.report_path):
+            if base.is_file() and not base.is_symlink():items=[base]
+            elif base.is_dir() and not base.is_symlink():items=[p for p in base.rglob("*") if p.is_file() and not p.is_symlink()]
+            else:items=[]
+            for p in items:
+                name=p.relative_to(self.root).as_posix()
+                if name.startswith("yj64-workspace/histories/"):
+                    continue
+                data=p.read_bytes()
+                result[name]=self._sanitize_json(data) if p.suffix.lower()==".json" else data
+        for pattern in ("yj64-router-config.json","yj64-llm-config*.json"):
+            for p in self.root.glob(pattern):
+                if p.is_file() and not p.is_symlink():
+                    result[p.name]=self._sanitize_json(p.read_bytes())
+        return result
+
+    def export_private_archives(self)->list[Path]:
+        """Write one isolated private ZIP per participant into app-private storage."""
+        source_dir=self.workspace_path/"histories"
+        if not source_dir.is_dir() or source_dir.is_symlink():
+            return []
+        target_dir=self.root/"yj64-private-archives"
+        target_dir.mkdir(parents=True,exist_ok=True)
+        created=[]
+        for source in sorted(source_dir.glob("*.json")):
+            if not source.is_file() or source.is_symlink():
+                continue
+            participant_id=source.stem
+            if not participant_id or not re.fullmatch(r"[A-Za-z0-9_-]+",participant_id):
+                continue
+            payload=source.read_bytes()
+            try:
+                rows=json.loads(payload.decode("utf-8"))
+            except (UnicodeDecodeError,json.JSONDecodeError) as exc:
+                raise IOError("Invalid private history: "+source.name) from exc
+            if not isinstance(rows,list):
+                raise IOError("Private history must be a JSON list: "+source.name)
+            member="histories/"+source.name
+            now=int(time.time()*1000)
+            manifest={
+                "schema":"yj64.private-chat.v1",
+                "participant_id":participant_id,
+                "created_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime(now/1000)),
+                "files":{member:{"sha256":self._sha(payload),"size":len(payload)}},
+            }
+            destination=target_dir/("YJ-64-PRIVATE-"+participant_id+".zip")
+            temporary=destination.with_suffix(".zip.tmp")
+            try:
+                with zipfile.ZipFile(temporary,"w",compression=zipfile.ZIP_DEFLATED) as archive:
+                    archive.writestr(member,payload)
+                    archive.writestr("manifest.json",json.dumps(manifest,ensure_ascii=False,indent=2))
+                with zipfile.ZipFile(temporary,"r") as check:
+                    if check.testzip() or set(check.namelist())!={member,"manifest.json"}:
+                        raise IOError("Private archive integrity check failed: "+participant_id)
+                    if self._sha(check.read(member))!=manifest["files"][member]["sha256"]:
+                        raise IOError("Private archive SHA-256 mismatch: "+participant_id)
+                os.replace(temporary,destination)
+            except Exception:
+                temporary.unlink(missing_ok=True)
+                raise
+            created.append(destination)
+        return created
+
+    @staticmethod
+    def _merge_history
+NEW FRAGMENT END
+
+---
+
+PATCH-ID: YJ64-PRIVATE-ARCHIVE-002
+
+TARGET FILE: yj64_persistent_core.py
+
+PURPOSE:
+
+Запускать создание отдельных личных ZIP при каждом штатном экспорте
+общего архива. Общий ZIP остаётся без личных историй; личные ZIP
+обновляются независимо и остаются во внутреннем хранилище приложения.
+
+ORIGINAL FRAGMENT BEGIN
+
+        return dest
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+        self.export_private_archives()
+        return dest
+
+NEW FRAGMENT END
+
+---
 
 ============================================================
 РАЗДЕЛ 5. КОНЕЦ ОПЕРАЦИОННОГО СТОЛА
