@@ -460,7 +460,19 @@ def generate_response(
         payload = {
             "agent_id": agent_id,
             "agent_version": 0,
-            "inputs": history or [{"role": "user", "content": prompt}],
+            "inputs": [
+                {
+                    "role": str(item.get("role") or "user").strip().lower(),
+                    "content": str(item.get("content") or ""),
+                }
+                for item in (history or [{"role": "user", "content": prompt}])
+                if (
+                    isinstance(item, dict)
+                    and str(item.get("role") or "user").strip().lower()
+                    in {"system", "user", "assistant"}
+                    and str(item.get("content") or "").strip()
+                )
+            ] or [{"role": "user", "content": prompt}],
         }
         headers = {"Authorization": f"Bearer {key}"}
         api_method = "conversations"
@@ -515,8 +527,9 @@ def generate_response(
         operation_id=operation, route_id=selected_route,
         provider=provider, model=model, api_method=api_method,
     )
-    # Retry the same participant request after rate limits; never fall back silently.
+    # Retry the same participant request after transient failures; never fall back silently.
     rate_attempt = 0
+    service_unavailable_attempt = 0
     while True:
         try:
             data = _request("POST", url, headers, payload=payload)
@@ -524,26 +537,44 @@ def generate_response(
         except Exception as exc:
             message = str(exc)
             limited = bool(re.search(r"HTTP 429|rate.?limit|too many requests|tokens per minute|requests per minute", message, re.I))
-            if not limited or rate_attempt >= 3:
+            unavailable = bool(re.search(
+                r"HTTP 503|service unavailable|temporarily unavailable|UNAVAILABLE",
+                message, re.I,
+            ))
+            if limited and rate_attempt < 3:
+                rate_attempt += 1
+                match = re.search(r"Retry-After\s*[=:]\s*([0-9]+)", message, re.I)
+                wait_seconds = max(1, min(120, int(match.group(1)))) if match else min(60, 15 * rate_attempt)
                 _report(
-                    report, "gateway_request_failed",
+                    report, "gateway_rate_limit_wait",
                     operation_id=operation, route_id=selected_route,
-                    provider=provider, model=model, mode=selected_mode,
-                    api_method=api_method, endpoint=url,
-                    error_type=type(exc).__name__, error=message,
-                    rate_limit_retry_attempt=rate_attempt,
+                    provider=provider, model=model, attempt=rate_attempt,
+                    wait_seconds=wait_seconds, error=message[:500],
                 )
-                raise
-            rate_attempt += 1
-            match = re.search(r"Retry-After\s*[=:]\s*([0-9]+)", message, re.I)
-            wait_seconds = max(1, min(120, int(match.group(1)))) if match else min(60, 15 * rate_attempt)
+                time.sleep(wait_seconds)
+                continue
+            if unavailable and service_unavailable_attempt < 1:
+                service_unavailable_attempt += 1
+                wait_seconds = 20
+                _report(
+                    report, "gateway_service_unavailable_wait",
+                    operation_id=operation, route_id=selected_route,
+                    provider=provider, model=model,
+                    attempt=service_unavailable_attempt,
+                    wait_seconds=wait_seconds, error=message[:500],
+                )
+                time.sleep(wait_seconds)
+                continue
             _report(
-                report, "gateway_rate_limit_wait",
+                report, "gateway_request_failed",
                 operation_id=operation, route_id=selected_route,
-                provider=provider, model=model, attempt=rate_attempt,
-                wait_seconds=wait_seconds, error=message[:500],
+                provider=provider, model=model, mode=selected_mode,
+                api_method=api_method, endpoint=url,
+                error_type=type(exc).__name__, error=message,
+                rate_limit_retry_attempt=rate_attempt,
+                service_unavailable_retry_attempt=service_unavailable_attempt,
             )
-            time.sleep(wait_seconds)
+            raise
     _report(
         report, "gateway_http_response_received",
         operation_id=operation, route_id=selected_route,
