@@ -1799,3 +1799,144 @@ IMPLEMENTATION GATE:
 Эти классы должны быть подключены к реальному построению запросов; простое
 наличие отдельных файлов не является выполнением Q-003-C/D/E/F.
 
+
+
+---
+
+PATCH-ID: Q003-I-CI-TEST-GATES-001
+
+TARGET FILE: .github/workflows/ci.yml
+
+PURPOSE:
+
+Расширить CI для Q-003: компиляция новых модулей, запуск unit tests,
+проверка приватности/контекста/разрешений. Проверка должна запускаться
+при изменении соответствующих исходников и тестов как в push, так и PR.
+
+ORIGINAL FRAGMENT BEGIN
+
+  push:
+    branches: ['main']
+    paths:
+      - 'PROTECTED-LINE-GUARD'
+      - 'main.py'
+      - 'chat_workspace.py'
+      - 'yj64_persistent_core.py'
+      - 'buildozer.spec'
+      - 'llm_api.py'
+      - 'llm_settings.py'
+      - 'message_distributor.py'
+      - '.github/workflows/ci.yml'
+      - 'tools/verify_guard.py'
+  pull_request:
+    branches: ['main']
+    paths:
+      - 'PROTECTED-LINE-GUARD'
+      - 'main.py'
+      - 'llm_api.py'
+      - 'llm_settings.py'
+      - 'message_distributor.py'
+      - '.github/workflows/ci.yml'
+      - 'tools/verify_guard.py'
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+  push:
+    branches: ['main']
+    paths:
+      - 'PROTECTED-LINE-GUARD'
+      - 'main.py'
+      - 'chat_workspace.py'
+      - 'yj64_persistent_core.py'
+      - 'permission_manager.py'
+      - 'semantic_memory.py'
+      - 'context_manager.py'
+      - 'system_chat.py'
+      - 'tests/**'
+      - 'buildozer.spec'
+      - 'llm_api.py'
+      - 'llm_settings.py'
+      - 'message_distributor.py'
+      - 'services/**'
+      - '.github/workflows/ci.yml'
+      - 'tools/verify_guard.py'
+  pull_request:
+    branches: ['main']
+    paths:
+      - 'PROTECTED-LINE-GUARD'
+      - 'main.py'
+      - 'chat_workspace.py'
+      - 'yj64_persistent_core.py'
+      - 'permission_manager.py'
+      - 'semantic_memory.py'
+      - 'context_manager.py'
+      - 'system_chat.py'
+      - 'tests/**'
+      - 'llm_api.py'
+      - 'llm_settings.py'
+      - 'message_distributor.py'
+      - 'services/**'
+      - '.github/workflows/ci.yml'
+      - 'tools/verify_guard.py'
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+      - name: Compile protected Python modules
+        run: |
+          python3 -m py_compile main.py chat_workspace.py yj64_persistent_core.py permission_manager.py semantic_memory.py context_manager.py system_chat.py llm_api.py llm_settings.py message_distributor.py tools/verify_guard.py
+      - name: Run Q-003 unit tests
+        run: |
+          python3 -m unittest discover -s tests -v
+
+NEW FRAGMENT END
+
+TESTS:
+
+1. CI запускается при изменении любого Q-003 модуля, теста или Guard.
+2. py_compile проверяет все новые модули.
+3. unittest discovery запускает тесты и возвращает ненулевой код при ошибке.
+4. Build не считается успешным только по py_compile; functional tests должны
+   быть отдельным обязательным gate перед ручным Android Build.
+
+---
+
+PATCH-ID: Q003-I-MANUAL-ANDROID-BUILD-001
+
+TARGET FILE: .github/workflows/android-apk.yml
+
+PURPOSE:
+
+Убрать автоматический Android Build от каждого изменения Guard.
+Guard и рабочие исходники должны пройти CI и тесты; APK запускается только
+отдельным workflow_dispatch после проверки commit и version bump.
+
+ORIGINAL FRAGMENT BEGIN
+
+on:
+  push:
+    branches: ['main']
+    paths:
+      - 'PROTECTED-LINE-GUARD'
+  workflow_dispatch:
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+on:
+  workflow_dispatch:
+
+NEW FRAGMENT END
+
+TESTS:
+
+1. Push изменения Guard больше не запускает Android Build автоматически.
+2. Workflow остаётся доступен вручную через workflow_dispatch.
+3. Перед ручным запуском проверяется commit SHA, versionCode/versionName
+   и успешный CI на том же commit.
+4. В сборку не допускается commit, содержащий только изменения Guard.
+
