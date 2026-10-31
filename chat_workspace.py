@@ -26,6 +26,17 @@ class ChatWorkspace:
             self._write_json(self.index_path, {"chats": []})
         if not self.list_chats():
             self.create_chat("Общий чат")
+        self.ensure_chat_files()
+
+    def ensure_chat_files(self) -> None:
+        """Create missing chat histories without overwriting existing files."""
+        for chat in self.list_chats():
+            chat_id = str(chat.get("id", "")).strip()
+            if not chat_id:
+                continue
+            path = self._messages_path(chat_id)
+            if not path.exists():
+                self._write_json(path, [])
 
     @staticmethod
     def _write_json(path: Path, value: Any) -> None:
