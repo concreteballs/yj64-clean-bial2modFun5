@@ -167,7 +167,17 @@ class ChatWorkspace:
         agent = self.load_agent(agent_id)
         if agent is None:
             return
+        now_ms = int(time.time() * 1000)
         messages = agent.setdefault("private_messages", [])
-        messages.append({"role": str(role), "content": str(content), "timestamp_ms": int(time.time() * 1000)})
+        messages.append({
+            "message_id": uuid.uuid4().hex,
+            "role": str(role),
+            "content": str(content),
+            "timestamp": now_ms / 1000.0,
+            "timestamp_ms": now_ms,
+            "session_id": agent.get("session_id"),
+            "participant_id": str(agent.get("runner") or ""),
+            "message_type": "private_agent_chat",
+        })
         agent["private_messages"] = messages[-1000:]
         self.save_agent(agent)
