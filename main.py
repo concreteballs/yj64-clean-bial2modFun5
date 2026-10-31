@@ -1275,8 +1275,8 @@ class YJ64BaseApp(App):
             self.status.text = "Модуль удалённого участника пока недоступен: " + error
             content = BoxLayout(orientation="vertical", spacing=10, padding=12)
             content.add_widget(Label(text=(
-                "Модуль REMOTE DEVICE / ADMIN MODULE не удалось загрузить.\\n\\n"
-                + error + "\\n\\nПриложение продолжает работу."
+                "Модуль REMOTE DEVICE / ADMIN MODULE не удалось загрузить.\n\n"
+                + error + "\n\nПриложение продолжает работу."
             )))
             close = FeedbackButton(text="ЗАКРЫТЬ", size_hint_y=None, height=48)
             popup = Popup(title="MODULE — ОШИБКА ЗАГРУЗКИ", content=content, size_hint=(0.92, 0.48))
