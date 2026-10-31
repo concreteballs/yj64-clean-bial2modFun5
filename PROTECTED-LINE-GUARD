@@ -917,3 +917,41 @@ PROPOSED NEW FRAGMENT:
 
 СТАТУС: ТОЛЬКО НА ОПЕРАЦИОННОМ СТОЛЕ. РАБОЧИЕ ФАЙЛЫ НЕ МЕНЯТЬ.
 GUARD VALIDATION И ANDROID BUILD НЕ ЗАПУСКАЛИСЬ.
+
+
+============================================================
+PATCH IMPLEMENTATION RECORD — YJ64-REMOTE-RENAME-RESTORED-CONTEXT-002
+APPROVED BY OWNER: 2026-10-31
+TARGET: main.py; buildozer.spec; .github/workflows/android-apk.yml
+VERSION: 0.1.33
+
+EXACT ORIGINAL FRAGMENTS VERIFIED AGAINST WORKING BRANCH BEFORE EDIT:
+- _open_remote_participant(): exact import/client initialization block.
+- _open_chat_appearance_settings(): complete method; remove legacy participant-name fields because rename moves to participant menu.
+- _participant_label(): insert custom-name precedence before localized default labels.
+- _open_participant_menu(): insert rename action after participant title.
+- build(): workspace initialization and common-history load.
+- _on_archive_activity_result(): complete existing import branch.
+- private participant send_message(): common/private history construction.
+- _send_llm_chat(): per-participant history_snapshot loop.
+
+IMPLEMENTATION DETAILS:
+1. REMOTE import is wrapped in try/except; failure is reported and shown in a popup without crashing the base app. remote_participant.py itself is absent from this branch and is NOT created by this patch.
+2. Participant rename is moved from global appearance settings into each participant menu. _participant_label() now prioritizes saved display names, so participant buttons reflect the change. Font settings retain stored names.
+3. Restored common archive messages are stored in yj64-workspace/restored-model-context.json, separately from common_history. Existing restored context is merged with messages from every archived common chat; stable message IDs (or legacy content hashes) deduplicate entries; timestamp ordering is retained.
+4. Import creates a fresh visible chat and sets common_history to empty. Archived content is never copied into the visible transcript.
+5. Restored common context is included in general participant model requests and private participant requests. Participant-specific private histories remain separate and are appended only to that participant's request.
+6. Private agent records under agents/*.json are not flattened into common restored context. Their private_messages remain separate.
+7. The context file is inside yj64-workspace and is therefore included by PersistentCore._collect_files() in subsequent archives.
+8. buildozer.spec version is raised from 0.1.32 to 0.1.33. Android workflow names the APK YJ-64-Base-v0.1.33-arm64-v8a-debug.apk and artifact yj64-base-v0.1.33-apk.
+
+ACCEPTANCE CHECKS REQUIRED:
+- Python compile and Guard Validation PASS before Android build.
+- Verify no restored messages appear in common_history or chat_output after import.
+- Verify Participant 1/2 each answer from restored context.
+- Verify context survives restart and a second archive/export/import cycle.
+- Verify custom participant labels persist after restart and appear on participant buttons.
+- Verify missing remote_participant import opens error popup and app remains usable.
+
+STATUS: IMPLEMENTED IN WORKING FILES; VALIDATION PENDING.
+============================================================
