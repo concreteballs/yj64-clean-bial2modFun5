@@ -1881,6 +1881,29 @@ NEW FRAGMENT BEGIN
       - '.github/workflows/ci.yml'
       - 'tools/verify_guard.py'
 
+NEW FRAGMENT END
+
+TESTS:
+
+1. CI запускается при изменении любого Q-003 модуля, теста или Guard.
+2. Проверка охватывает исходники и тесты в push и pull_request.
+
+---
+
+PATCH-ID: Q003-I-CI-TEST-COMMAND-001
+
+TARGET FILE: .github/workflows/ci.yml
+
+PURPOSE:
+
+Добавить компиляцию всех новых модулей и обязательный запуск unittest.
+
+ORIGINAL FRAGMENT BEGIN
+
+      - name: Compile protected Python modules
+        run: |
+          python3 -m py_compile main.py chat_workspace.py yj64_persistent_core.py llm_api.py llm_settings.py message_distributor.py tools/verify_guard.py
+
 ORIGINAL FRAGMENT END
 
 NEW FRAGMENT BEGIN
@@ -1896,11 +1919,9 @@ NEW FRAGMENT END
 
 TESTS:
 
-1. CI запускается при изменении любого Q-003 модуля, теста или Guard.
-2. py_compile проверяет все новые модули.
-3. unittest discovery запускает тесты и возвращает ненулевой код при ошибке.
-4. Build не считается успешным только по py_compile; functional tests должны
-   быть отдельным обязательным gate перед ручным Android Build.
+1. py_compile проверяет все новые модули.
+2. unittest discovery запускает тесты и возвращает ненулевой код при ошибке.
+3. Functional tests являются обязательным gate перед ручным Android Build.
 
 ---
 
