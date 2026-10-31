@@ -459,9 +459,9 @@ def validate_archive_system():
 
 Контрольные значения — Git blob SHA-1.
 
-EXPECTED-GIT-BLOB-SHA:main.py=7f2e66262da5ce3d9abdf0d7db3f9eb2359c183f
+EXPECTED-GIT-BLOB-SHA:main.py=77ebb29915e85a408fbe90a98e6134c9709926e4
 EXPECTED-GIT-BLOB-SHA:chat_workspace.py=a69bd79e619bfccf79eb596ed7a9f7bbe0bf0c39
-EXPECTED-GIT-BLOB-SHA:buildozer.spec=f937a18d10eb6efc3a284f6ea907dd460d482451
+EXPECTED-GIT-BLOB-SHA:buildozer.spec=974e7ac426db7973ff4feddbcc37c477319df750
 
 После каждого согласованного переноса изменения в рабочие файлы
 контрольные SHA должны быть обновлены по фактическому содержимому.
