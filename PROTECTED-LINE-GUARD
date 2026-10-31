@@ -1283,3 +1283,487 @@ if __name__ == "__main__":
 
 NEW FRAGMENT END
 
+
+
+---
+
+PATCH-ID: Q003-E-SEMANTIC-MEMORY-001
+
+TARGET FILE: semantic_memory.py
+
+PURPOSE:
+
+Создать хранилище производной семантической памяти с происхождением,
+confidence, областями видимости и обнаружением изменений/удалений исходных
+сообщений. Первичная история остаётся неизменной и хранится отдельно.
+
+ORIGINAL FRAGMENT BEGIN
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+"""Provenance-aware semantic memory; raw chat history remains authoritative."""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import time
+import uuid
+from pathlib import Path
+from typing import Any, Iterable
+
+
+class SemanticMemory:
+    SCHEMA = "yj64.semantic-memory.v1"
+    TYPES = frozenset({
+        "fact", "decision", "preference", "hypothesis", "question", "conflict"
+    })
+
+    def __init__(self, user_data_dir: str | Path, *, clock=time.time) -> None:
+        self.path = Path(user_data_dir) / "yj64-workspace" / "semantic-memory.json"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.clock = clock
+        self.state = self._load()
+
+    def _load(self) -> dict[str, Any]:
+        if not self.path.exists():
+            return {"schema": self.SCHEMA, "items": [], "sources": {}}
+        try:
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as exc:
+            raise IOError("Semantic memory is unreadable; refusing to overwrite") from exc
+        if (
+            not isinstance(value, dict)
+            or value.get("schema") != self.SCHEMA
+            or not isinstance(value.get("items"), list)
+            or not isinstance(value.get("sources"), dict)
+        ):
+            raise IOError("Invalid semantic memory schema")
+        return value
+
+    @staticmethod
+    def _digest(message: dict[str, Any]) -> str:
+        payload = json.dumps(message, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _save(self) -> None:
+        temp = self.path.with_name(self.path.name + ".tmp")
+        try:
+            with temp.open("w", encoding="utf-8") as handle:
+                json.dump(self.state, handle, ensure_ascii=False, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, self.path)
+        finally:
+            temp.unlink(missing_ok=True)
+
+    def sync_sources(
+        self,
+        messages: Iterable[dict[str, Any]],
+        *,
+        scope: str,
+        participant_id: str | None = None,
+    ) -> dict[str, list[str]]:
+        scope_key = str(scope).strip()
+        if not scope_key:
+            raise ValueError("scope is required")
+        current: dict[str, str] = {}
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            message_id = str(message.get("message_id") or "").strip()
+            if not message_id:
+                continue
+            current[message_id] = self._digest(message)
+        key = scope_key + ":" + str(participant_id or "common")
+        previous = self.state["sources"].get(key, {})
+        if not isinstance(previous, dict):
+            previous = {}
+        old_ids, new_ids = set(previous), set(current)
+        added = sorted(new_ids - old_ids)
+        changed = sorted(mid for mid in new_ids & old_ids if current[mid] != previous[mid])
+        deleted = sorted(old_ids - new_ids)
+        invalidated = set(changed + deleted)
+        if invalidated:
+            for item in self.state["items"]:
+                sources = set(item.get("source_message_ids") or [])
+                if sources & invalidated:
+                    item["status"] = "stale"
+                    item["stale_reason"] = (
+                        "source_changed" if sources & set(changed) else "source_deleted"
+                    )
+                    item["updated_at"] = self.clock()
+        self.state["sources"][key] = current
+        self._save()
+        return {"added": added, "changed": changed, "deleted": deleted}
+
+    def upsert(
+        self,
+        *,
+        item_type: str,
+        text: str,
+        source_message_ids: list[str],
+        scope: str,
+        participant_id: str | None = None,
+        confidence: float,
+    ) -> str:
+        if item_type not in self.TYPES:
+            raise ValueError("Unsupported semantic memory item type")
+        body = str(text).strip()
+        sources = sorted({str(x).strip() for x in source_message_ids if str(x).strip()})
+        scope_key = str(scope).strip()
+        if not body or not sources or not scope_key:
+            raise ValueError("text, source_message_ids and scope are required")
+        if isinstance(confidence, bool) or not 0.0 <= float(confidence) <= 1.0:
+            raise ValueError("confidence must be between 0 and 1")
+        now = self.clock()
+        item_id = uuid.uuid4().hex
+        record = {
+            "id": item_id,
+            "type": item_type,
+            "text": body,
+            "confidence": float(confidence),
+            "source_message_ids": sources,
+            "participant_id": str(participant_id) if participant_id else None,
+            "scope": scope_key,
+            "created_at": now,
+            "updated_at": now,
+            "status": "active",
+        }
+        self.state["items"].append(record)
+        self._save()
+        return item_id
+
+    def list_items(
+        self, *, scope: str, participant_id: str | None = None,
+        include_stale: bool = False,
+    ) -> list[dict[str, Any]]:
+        result = []
+        for item in self.state["items"]:
+            if item.get("scope") != scope:
+                continue
+            if item.get("participant_id") != participant_id:
+                continue
+            if not include_stale and item.get("status") != "active":
+                continue
+            result.append(dict(item))
+        return result
+
+
+NEW FRAGMENT END
+
+TESTS:
+
+1. Добавление нового message_id фиксируется как added.
+2. Изменение содержимого того же message_id фиксируется как changed.
+3. Удаление ранее известного message_id фиксируется как deleted.
+4. Семантический элемент ссылается на source_message_ids и становится
+   stale при изменении/удалении источника.
+5. Общая и participant-scoped память не смешиваются.
+6. Ошибка чтения повреждённого хранилища не приводит к его перезаписи.
+7. sync_sources не изменяет переданные исходные сообщения.
+
+---
+
+PATCH-ID: Q003-F-CONTEXT-MANAGER-001
+
+TARGET FILE: context_manager.py
+
+PURPOSE:
+
+Реализовать отдельные режимы Memory Only, Memory + Recent и Full History.
+Не смешивать эти режимы с транспортными/API режимами text и agent.
+Не обрезать сообщения молча: при невозможности уложить обязательный слой
+в бюджет возвращать явную ошибку.
+
+ORIGINAL FRAGMENT BEGIN
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+"""Explicit context selection with no silent truncation or mode fallback."""
+from __future__ import annotations
+
+import math
+from typing import Any, Callable, Iterable
+
+
+class ContextBudgetError(ValueError):
+    pass
+
+
+class ContextManager:
+    MODES = frozenset({"memory_only", "memory_recent", "full_history"})
+
+    def __init__(self, token_counter: Callable[[str], int]) -> None:
+        if not callable(token_counter):
+            raise ValueError("A provider-compatible token_counter is required")
+        self.token_counter = token_counter
+
+    def build(
+        self,
+        *,
+        mode: str,
+        token_budget: int,
+        memory_items: Iterable[dict[str, Any]],
+        recent_messages: Iterable[dict[str, Any]],
+        full_history: Iterable[dict[str, Any]],
+        participant_id: str | None,
+        transport_mode: str,
+    ) -> dict[str, Any]:
+        if mode not in self.MODES:
+            raise ValueError("Unknown context mode")
+        if isinstance(token_budget, bool) or not isinstance(token_budget, int) or token_budget <= 0:
+            raise ValueError("token_budget must be a positive integer")
+        if transport_mode not in ("text", "agent"):
+            raise ValueError("Unknown transport/API mode")
+        memories = [
+            dict(item) for item in memory_items
+            if isinstance(item, dict)
+            and item.get("status", "active") == "active"
+            and item.get("participant_id") == participant_id
+        ]
+        recent = [dict(item) for item in recent_messages if isinstance(item, dict)]
+        history = [dict(item) for item in full_history if isinstance(item, dict)]
+
+        memory_layer = [
+            {
+                "role": "system",
+                "content": (
+                    "[SEMANTIC_MEMORY] " + str(item.get("type", "memory"))
+                    + ": " + str(item.get("text", ""))
+                ),
+                "provenance": {
+                    "source": "semantic_memory",
+                    "memory_id": str(item.get("id", "")),
+                    "source_message_ids": list(item.get("source_message_ids") or []),
+                    "scope": item.get("scope"),
+                    "confidence": item.get("confidence"),
+                },
+            }
+            for item in memories
+        ]
+
+        def count(rows: list[dict[str, Any]]) -> int:
+            return sum(
+                max(0, int(self.token_counter(str(row.get("content", "")))))
+                for row in rows
+            )
+
+        if mode == "memory_only":
+            selected = memory_layer
+        elif mode == "full_history":
+            selected = history
+        else:
+            selected = list(memory_layer)
+            used = count(selected)
+            if used > token_budget:
+                raise ContextBudgetError(
+                    "Semantic memory alone exceeds the configured context budget"
+                )
+            selected_recent = []
+            for message in reversed(recent):
+                candidate = selected_recent + [message]
+                if used + count(candidate) > token_budget:
+                    break
+                selected_recent = candidate
+            selected.extend(selected_recent)
+
+        used = count(selected)
+        if used > token_budget:
+            raise ContextBudgetError(
+                f"Selected context requires {used} tokens; budget is {token_budget}"
+            )
+        return {
+            "context_mode": mode,
+            "transport_mode": transport_mode,
+            "participant_id": participant_id,
+            "estimated_or_provider_tokens": used,
+            "token_budget": token_budget,
+            "messages": selected,
+            "provenance": [
+                dict(row.get("provenance") or {"source": "history"})
+                for row in selected
+            ],
+        }
+
+
+NEW FRAGMENT END
+
+TESTS:
+
+1. memory_only включает только active semantic memory.
+2. memory_recent добавляет последние целые сообщения, не разрезая их.
+3. full_history не удаляет и не сокращает сообщения.
+4. Превышение бюджета вызывает ContextBudgetError, без silent truncation.
+5. Неизвестный context mode не переключается автоматически на другой.
+6. transport_mode остаётся отдельным полем и не выбирает context mode.
+7. participant-scoped memory другого участника не попадает в контекст.
+
+IMPLEMENTATION GATE:
+
+Перед production-интеграцией token_counter должен быть привязан к
+реальному tokenizer/лимиту выбранного провайдера. При отсутствии точного
+счётчика запрещено представлять оценку как гарантированный provider limit.
+
+---
+
+PATCH-ID: Q003-D-SYSTEM-CHAT-001
+
+TARGET FILE: system_chat.py
+
+PURPOSE:
+
+Создать отдельное хранилище system instructions и system chat для каждого
+стабильного participant_id. Имя модели или отображаемое имя не является
+идентификатором. Только владелец меняет system instructions.
+
+ORIGINAL FRAGMENT BEGIN
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+"""Owner-managed system instructions and isolated participant system chats."""
+from __future__ import annotations
+
+import json
+import os
+import re
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+
+class SystemChatAccessDenied(PermissionError):
+    pass
+
+
+class SystemChatStore:
+    SCHEMA = "yj64.system-chat.v1"
+
+    def __init__(self, user_data_dir: str | Path, owner_id: str) -> None:
+        self.root = Path(user_data_dir) / "yj64-workspace" / "system-chats"
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.owner_id = str(owner_id).strip()
+        if not self.owner_id:
+            raise ValueError("owner_id is required")
+
+    @staticmethod
+    def _safe_id(value: str) -> str:
+        safe = re.sub(r"[^A-Za-z0-9_-]", "", str(value))
+        if not safe:
+            raise ValueError("Invalid participant_id")
+        return safe
+
+    def _path(self, participant_id: str) -> Path:
+        return self.root / (self._safe_id(participant_id) + ".json")
+
+    def _read(self, participant_id: str) -> dict[str, Any]:
+        path = self._path(participant_id)
+        if not path.exists():
+            return {
+                "schema": self.SCHEMA,
+                "participant_id": self._safe_id(participant_id),
+                "system_instructions": "",
+                "messages": [],
+            }
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as exc:
+            raise IOError("System chat is unreadable; refusing to overwrite") from exc
+        if (
+            not isinstance(value, dict)
+            or value.get("schema") != self.SCHEMA
+            or value.get("participant_id") != self._safe_id(participant_id)
+            or not isinstance(value.get("messages"), list)
+            or not isinstance(value.get("system_instructions"), str)
+        ):
+            raise IOError("Invalid system chat schema")
+        return value
+
+    def _write(self, participant_id: str, value: dict[str, Any]) -> None:
+        path = self._path(participant_id)
+        temp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+        try:
+            with temp.open("w", encoding="utf-8") as handle:
+                json.dump(value, handle, ensure_ascii=False, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, path)
+        finally:
+            temp.unlink(missing_ok=True)
+
+    def set_system_instructions(
+        self, *, actor_id: str, participant_id: str, instructions: str
+    ) -> None:
+        if str(actor_id).strip() != self.owner_id:
+            raise SystemChatAccessDenied("Only the owner may edit system instructions")
+        data = self._read(participant_id)
+        data["system_instructions"] = str(instructions)
+        data["instructions_updated_at"] = time.time()
+        self._write(participant_id, data)
+
+    def append_message(
+        self, *, actor_id: str, participant_id: str, role: str, content: str
+    ) -> None:
+        actor = str(actor_id).strip()
+        pid = self._safe_id(participant_id)
+        if actor not in (self.owner_id, pid):
+            raise SystemChatAccessDenied("Actor cannot write another participant's system chat")
+        if role not in ("user", "assistant", "system"):
+            raise ValueError("Unsupported system-chat role")
+        if role == "system" and actor != self.owner_id:
+            raise SystemChatAccessDenied("Only the owner may append a system message")
+        data = self._read(pid)
+        data["messages"].append({
+            "message_id": uuid.uuid4().hex,
+            "actor_id": actor,
+            "role": role,
+            "content": str(content),
+            "timestamp_ms": int(time.time() * 1000),
+        })
+        self._write(pid, data)
+
+    def load_for_participant(
+        self, *, actor_id: str, participant_id: str
+    ) -> dict[str, Any]:
+        actor = str(actor_id).strip()
+        pid = self._safe_id(participant_id)
+        if actor not in (self.owner_id, pid):
+            raise SystemChatAccessDenied("Actor cannot read another participant's system chat")
+        data = self._read(pid)
+        return {
+            "participant_id": pid,
+            "system_instructions": data["system_instructions"],
+            "messages": [dict(item) for item in data["messages"]],
+            "provenance": {
+                "instructions_source": "owner",
+                "chat_source": "participant_system_chat",
+                "participant_id": pid,
+            },
+        }
+
+
+NEW FRAGMENT END
+
+TESTS:
+
+1. Participant 1 не читает и не изменяет system chat Participant 2.
+2. Participant не может менять system instructions.
+3. Владелец может менять инструкции отдельно для каждого participant_id.
+4. История system chat Participant 1 не смешивается с Participant 2.
+5. Повреждённый JSON не перезаписывается пустым содержимым.
+6. Повторное открытие после перезапуска сохраняет инструкции и сообщения.
+
+IMPLEMENTATION GATE:
+
+Владелец должен быть аутентифицирован приложением, а participant_id должен
+быть взят из доверенной конфигурации маршрутизатора, а не из текста модели.
+Эти классы должны быть подключены к реальному построению запросов; простое
+наличие отдельных файлов не является выполнением Q-003-C/D/E/F.
+
