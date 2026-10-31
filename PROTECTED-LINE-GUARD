@@ -641,10 +641,124 @@ Q-003:
 
 EXPECTED-GIT-BLOB-SHA:main.py=7f2e66262da5ce3d9abdf0d7db3f9eb2359c183f
 EXPECTED-GIT-BLOB-SHA:chat_workspace.py=a69bd79e619bfccf79eb596ed7a9f7bbe0bf0c39
+EXPECTED-GIT-BLOB-SHA:llm_api.py=6eac9b76ebdcd95ccdeb103242d0a6d423311f0e
 EXPECTED-GIT-BLOB-SHA:buildozer.spec=f937a18d10eb6efc3a284f6ea907dd460d482451
 
 После каждого согласованного переноса изменения в рабочие файлы
 контрольные SHA должны быть обновлены по фактическому содержимому.
+
+
+---
+
+PATCH-ID: YJ64-ARCHIVE-MODEL-CONTEXT-001
+
+TARGET FILE: main.py
+
+PURPOSE:
+
+После восстановления архива сохранить старую общую переписку как
+отдельный контекст моделей, не помещая её в видимую ленту нового
+общего чата. Новые сообщения продолжают отображаться и сохраняться
+обычным способом.
+
+ORIGINAL FRAGMENT BEGIN
+
+        self.current_chat_id = str(chats[0]["id"])
+        self.common_history: list[dict[str, str]] = self.workspace.load_messages(self.current_chat_id)
+        self.private_histories: dict[str, list[dict[str, str]]] = {}
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+        self.current_chat_id = str(chats[0]["id"])
+        self.common_history: list[dict[str, str]] = self.workspace.load_messages(self.current_chat_id)
+        self.model_context_path = Path(self.user_data_dir) / "yj64-workspace" / "model-context-history.json"
+        try:
+            stored_context = json.loads(self.model_context_path.read_text(encoding="utf-8"))
+            self.model_context_history = stored_context if isinstance(stored_context, list) else []
+        except (OSError, ValueError, TypeError):
+            self.model_context_history = []
+        self.private_histories: dict[str, list[dict[str, str]]] = {}
+
+NEW FRAGMENT END
+
+---
+
+ORIGINAL FRAGMENT BEGIN
+
+                from chat_workspace import ChatWorkspace
+                self.workspace = ChatWorkspace(self.user_data_dir)
+                chats = self.workspace.list_chats()
+                if chats:
+                    self.current_chat_id = str(chats[0]["id"])
+                    self.common_history = self.workspace.load_messages(self.current_chat_id)
+                    if hasattr(self, "chat_output"):
+                        self.chat_output.text = self._render_history()
+                self.private_histories = {}
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+                from chat_workspace import ChatWorkspace
+                self.workspace = ChatWorkspace(self.user_data_dir)
+                chats = self.workspace.list_chats()
+                if chats:
+                    self.current_chat_id = str(chats[0]["id"])
+                    restored_context = self.workspace.load_messages(self.current_chat_id)
+                    self.model_context_history = restored_context
+                    self.model_context_path = Path(self.user_data_dir) / "yj64-workspace" / "model-context-history.json"
+                    self.model_context_path.parent.mkdir(parents=True, exist_ok=True)
+                    self.model_context_path.write_text(
+                        json.dumps(self.model_context_history, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    self.workspace.save_messages(self.current_chat_id, [])
+                    self.common_history = []
+                    if hasattr(self, "chat_output"):
+                        self.chat_output.text = self._render_history()
+                self.private_histories = {}
+
+NEW FRAGMENT END
+
+---
+
+ORIGINAL FRAGMENT BEGIN
+
+                        # Exclude the target participant's own prior answers from its context.
+                        history_snapshot = []
+                        for item in self.common_history:
+                            content = str(item.get("content") or "")
+                            if item.get("role") == "assistant" and content.startswith(name + ":"):
+                                continue
+                            history_snapshot.append(dict(item))
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+                        # Keep restored archive context available to models without showing it
+                        # in the new common-chat transcript.
+                        history_snapshot = []
+                        for item in self.model_context_history + self.common_history:
+                            content = str(item.get("content") or "")
+                            if item.get("role") == "assistant" and content.startswith(name + ":"):
+                                continue
+                            history_snapshot.append(dict(item))
+
+NEW FRAGMENT END
+
+TESTS:
+
+1. После восстановления старая переписка отсутствует в видимой ленте общего чата.
+2. Старая переписка сохранена в yj64-workspace/model-context-history.json.
+3. Запросы участников общего диалога получают model_context_history вместе
+   с текущей common_history.
+4. Новые сообщения отображаются и сохраняются в обычной common_history.
+5. Приватные чаты по-прежнему получают только собственную private_history.
+6. После перезапуска приложения отдельный model_context_history загружается.
+7. Повторный экспорт включает отдельный файл контекста моделей.
 
 ============================================================
 КОНЕЦ PROTECTED-LINE-GUARD
