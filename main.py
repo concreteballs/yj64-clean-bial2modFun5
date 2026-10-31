@@ -503,22 +503,18 @@ class YJ64BaseApp(App):
         popup.open()
         self._append_report("memory_archive_restore_offered")
 
-    def _auto_export_download_archive(self, *_: Any) -> None:
-        """Create a verified archive in public Downloads/YJ-64 without opening a picker."""
-        temp_path = Path(self.user_data_dir) / "YJ-64-backup-auto.zip"
-        verify_path = Path(self.user_data_dir) / "YJ-64-backup-auto-verify.zip"
+    def _publish_archive_file_to_downloads(self, source_path: Path) -> dict[str, Any]:
+        """Publish one ZIP to Download/YJ-64 and verify the public file by reading it back."""
+        from jnius import autoclass
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        ContentValues = autoclass("android.content.ContentValues")
+        MediaStoreDownloads = autoclass("android.provider.MediaStore$Downloads")
+        resolver = PythonActivity.mActivity.getContentResolver()
         uri = None
+        verify_path = Path(self.user_data_dir) / (source_path.stem + "-readback.zip")
         try:
-            self._save_common_history()
-            self.persistent_core.export_archive(temp_path)
-            from jnius import autoclass
-            PythonActivity = autoclass("org.kivy.android.PythonActivity")
-            ContentValues = autoclass("android.content.ContentValues")
-            MediaStoreDownloads = autoclass("android.provider.MediaStore$Downloads")
-            resolver = PythonActivity.mActivity.getContentResolver()
-            stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
             values = ContentValues()
-            values.put("display_name", "YJ-64-backup-" + stamp + ".zip")
+            values.put("display_name", source_path.name)
             values.put("mime_type", "application/zip")
             values.put("relative_path", "Download/YJ-64/")
             values.put("is_pending", 1)
@@ -528,10 +524,10 @@ class YJ64BaseApp(App):
             output = resolver.openOutputStream(uri)
             if output is None:
                 raise IOError("Android could not open the Downloads archive for writing")
-            source_digest = hashlib.sha256(temp_path.read_bytes()).hexdigest()
+            source_digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
             copied = 0
             try:
-                with temp_path.open("rb") as source:
+                with source_path.open("rb") as source:
                     while True:
                         chunk = source.read(65536)
                         if not chunk:
@@ -542,9 +538,9 @@ class YJ64BaseApp(App):
                 output.flush()
             finally:
                 output.close()
-            expected = temp_path.stat().st_size
-            if copied != expected or copied <= 0:
-                raise IOError(f"Downloads archive size mismatch: {copied} of {expected} bytes")
+            expected = source_path.stat().st_size
+            if copied <= 0 or copied != expected:
+                raise IOError(f"Downloads size mismatch: {copied} of {expected} bytes")
             readback = resolver.openInputStream(uri)
             if readback is None:
                 raise IOError("Android could not reopen the Downloads archive")
@@ -559,45 +555,93 @@ class YJ64BaseApp(App):
                         read_count += 1
             finally:
                 readback.close()
+            read_digest = hashlib.sha256(verify_path.read_bytes()).hexdigest()
             import zipfile
-            read_digest = hashlib.sha256(verify_path.read_bytes()).hexdigest() if verify_path.is_file() else ""
             if read_count != copied or read_digest != source_digest or not zipfile.is_zipfile(verify_path):
-                raise IOError("Downloads archive read-back, SHA-256 or ZIP integrity check failed")
+                raise IOError("Downloads read-back, SHA-256 or ZIP validation failed")
             with zipfile.ZipFile(verify_path, "r") as check_zip:
                 bad_member = check_zip.testzip()
                 if bad_member or "manifest.json" not in check_zip.namelist():
-                    raise IOError("Downloads archive is incomplete or has a corrupt member")
+                    raise IOError("Downloads archive is incomplete or corrupt")
             values_done = ContentValues()
             values_done.put("is_pending", 0)
             resolver.update(uri, values_done, None, None)
-            self._append_report("memory_archive_auto_download_succeeded",
-                                size_bytes=copied, readback_bytes=read_count,
-                                location="Download/YJ-64", zip_integrity_verified=True)
-            self._archive_auto_export_error = ""
-        except Exception as exc:
-            self._archive_auto_export_error = f"{type(exc).__name__}: {exc}"
-            self.status.text = (
-                "Автосохранение архива не удалось: "
-                + self._archive_auto_export_error
-            )
-            self._append_report(
-                "memory_archive_auto_download_failed",
-                error_type=type(exc).__name__,
-                error=str(exc),
-                location="Download/YJ-64",
-            )
+            return {"name": source_path.name, "size_bytes": copied, "uri": str(uri), "verified": True}
+        except Exception:
             if uri is not None:
                 try:
-                    from jnius import autoclass
-                    PythonActivity = autoclass("org.kivy.android.PythonActivity")
-                    PythonActivity.mActivity.getContentResolver().delete(
-                        uri, None, None
-                    )
+                    resolver.delete(uri, None, None)
                 except Exception:
                     pass
+            raise
         finally:
-            temp_path.unlink(missing_ok=True)
             verify_path.unlink(missing_ok=True)
+
+    def _auto_export_download_archive(self, *_: Any) -> None:
+        """Create common and participant-private ZIPs in the same public Downloads folder."""
+        temp_dir = Path(self.user_data_dir) / "yj64-archive-export"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        local_archives: list[Path] = []
+        results: list[dict[str, Any]] = []
+        failures: list[dict[str, str]] = []
+        try:
+            self._save_common_history()
+            common_path = temp_dir / "YJ64_common_chat.zip"
+            try:
+                self.persistent_core.export_archive(common_path)
+                local_archives.append(common_path)
+            except Exception as exc:
+                failures.append({"archive": common_path.name, "error": f"{type(exc).__name__}: {exc}"})
+                self._append_report("memory_archive_file_export_failed", archive=common_path.name,
+                                    archive_type="common", error_type=type(exc).__name__, error=str(exc))
+            try:
+                private_paths = self.persistent_core.export_private_archives(temp_dir)
+                local_archives.extend(private_paths)
+                self._append_report("memory_private_archives_prepared",
+                                    archive_count=len(private_paths),
+                                    archive_names=[path.name for path in private_paths])
+            except Exception as exc:
+                failures.append({"archive": "participant_private_archives", "error": f"{type(exc).__name__}: {exc}"})
+                self._append_report("memory_private_archives_export_failed",
+                                    error_type=type(exc).__name__, error=str(exc))
+            for archive_path in local_archives:
+                try:
+                    result = self._publish_archive_file_to_downloads(archive_path)
+                    results.append(result)
+                    self._append_report("memory_archive_file_download_succeeded",
+                                        archive=result["name"], size_bytes=result["size_bytes"],
+                                        location="Download/YJ-64", readback_verified=True)
+                except Exception as exc:
+                    failure = {"archive": archive_path.name, "error": f"{type(exc).__name__}: {exc}"}
+                    failures.append(failure)
+                    self._append_report("memory_archive_file_download_failed",
+                                        archive=archive_path.name, error_type=type(exc).__name__,
+                                        error=str(exc), location="Download/YJ-64")
+            if failures:
+                self.status.text = (
+                    f"Архивы: успешно {len(results)}, ошибок {len(failures)}. "
+                    "Подробности записаны в диагностический отчёт; проверь Download/YJ-64."
+                )
+            else:
+                self.status.text = (
+                    f"Архивы сохранены и проверены: {len(results)} файл(ов) в Download/YJ-64."
+                )
+            self._append_report("memory_archive_batch_completed",
+                                successful=len(results), failed=len(failures),
+                                results=results, failures=failures,
+                                all_archives_verified=bool(results) and not failures)
+            self._archive_auto_export_error = (
+                "; ".join(item["archive"] + ": " + item["error"] for item in failures)
+            )
+        except Exception as exc:
+            self._archive_auto_export_error = f"{type(exc).__name__}: {exc}"
+            self.status.text = "Автосохранение архивов не удалось: " + self._archive_auto_export_error
+            self._append_report("memory_archive_auto_download_failed",
+                                error_type=type(exc).__name__, error=str(exc),
+                                location="Download/YJ-64")
+        finally:
+            for path in local_archives:
+                path.unlink(missing_ok=True)
 
     def _create_memory_archive(self, *_: Any) -> None:
         """Create a portable ZIP then let Android's document picker save it outside app data."""
