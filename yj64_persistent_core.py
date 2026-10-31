@@ -40,7 +40,11 @@ class PersistentCore:
             elif base.is_dir() and not base.is_symlink():items=[p for p in base.rglob("*") if p.is_file() and not p.is_symlink()]
             else:items=[]
             for p in items:
-                name=p.relative_to(self.root).as_posix();data=p.read_bytes()
+                name=p.relative_to(self.root).as_posix()
+                # Named participant histories are private and never belong in the common archive.
+                if name.startswith("yj64-workspace/histories/"):
+                    continue
+                data=p.read_bytes()
                 result[name]=self._sanitize_json(data) if p.suffix.lower()==".json" else data
         for pattern in ("yj64-router-config.json","yj64-llm-config*.json"):
             for p in self.root.glob(pattern):
@@ -66,9 +70,110 @@ class PersistentCore:
                 if m.get("schema")!=self.ARCHIVE_SCHEMA:return {},None
                 return {n:z.read(n) for n in m.get("files",{})},m
         except (OSError,KeyError,ValueError,zipfile.BadZipFile,json.JSONDecodeError):return {},None
+    @staticmethod
+    def _safe_archive_stem(value: str) -> str:
+        stem = re.sub(r"[^A-Za-z0-9_-]+", "_", str(value)).strip("_-")
+        return stem[:64] or "participant"
+
+    def export_private_archives(self, destination: str | Path) -> list[Path]:
+        """Export one verified, separate ZIP per participant; never include these files in common ZIPs."""
+        destination = Path(destination)
+        destination.mkdir(parents=True, exist_ok=True)
+        workspace = self.workspace_path
+        histories = workspace / "histories"
+        agents = workspace / "agents"
+        grouped: dict[str, dict[str, Any]] = {}
+
+        if histories.is_dir():
+            for path in sorted(histories.glob("*.json")):
+                if not path.is_file() or path.is_symlink():
+                    continue
+                participant = path.stem
+                try:
+                    rows = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise IOError(f"Private history cannot be read: {path.name}: {exc}") from exc
+                if not isinstance(rows, list) or not all(isinstance(x, dict) for x in rows):
+                    raise IOError(f"Private history has invalid format: {path.name}")
+                grouped.setdefault(participant, {"histories": {}, "agents": []})
+                grouped[participant]["histories"][path.name] = rows
+
+        if agents.is_dir():
+            for path in sorted(agents.glob("*.json")):
+                if not path.is_file() or path.is_symlink():
+                    continue
+                try:
+                    agent = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise IOError(f"Agent record cannot be read: {path.name}: {exc}") from exc
+                if not isinstance(agent, dict):
+                    raise IOError(f"Agent record has invalid format: {path.name}")
+                private = agent.get("private_messages", [])
+                if not isinstance(private, list):
+                    raise IOError(f"Agent private_messages has invalid format: {path.name}")
+                if not private:
+                    continue
+                participant = self._safe_archive_stem(agent.get("runner") or "owner")
+                grouped.setdefault(participant, {"histories": {}, "agents": []})
+                grouped[participant]["agents"].append({
+                    "agent_id": str(agent.get("id") or path.stem),
+                    "name": str(agent.get("name") or ""),
+                    "runner": str(agent.get("runner") or ""),
+                    "created_ms": agent.get("created_ms"),
+                    "private_messages": private,
+                })
+
+        results: list[Path] = []
+        for participant, payload in sorted(grouped.items()):
+            archive_path = destination / ("YJ64_private_" + self._safe_archive_stem(participant) + ".zip")
+            members = {
+                "private-data.json": json.dumps(
+                    {"schema": "yj64.private-chat.v1", "participant_id": participant,
+                     "histories": payload["histories"], "agents": payload["agents"]},
+                    ensure_ascii=False, indent=2,
+                ).encode("utf-8")
+            }
+            manifest = {
+                "schema": "yj64.private-archive.v1",
+                "participant_id": participant,
+                "created_at_ms": int(time.time() * 1000),
+                "files": {name: {"sha256": self._sha(data), "size": len(data)}
+                          for name, data in sorted(members.items())},
+            }
+            temporary = archive_path.with_suffix(".zip.tmp")
+            try:
+                with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as z:
+                    for name, data in sorted(members.items()):
+                        z.writestr(name, data)
+                    z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+                if not zipfile.is_zipfile(temporary):
+                    raise IOError("Private archive is not a ZIP file")
+                with zipfile.ZipFile(temporary, "r") as z:
+                    if z.testzip() or len(z.namelist()) != len(set(z.namelist())):
+                        raise IOError("Private archive integrity check failed")
+                    if set(z.namelist()) != set(members) | {"manifest.json"}:
+                        raise IOError("Private archive member list mismatch")
+                    checked = json.loads(z.read("manifest.json").decode("utf-8"))
+                    for name, meta in checked.get("files", {}).items():
+                        data = z.read(name)
+                        if len(data) != int(meta.get("size", -1)) or self._sha(data) != meta.get("sha256"):
+                            raise IOError("Private archive SHA-256 mismatch: " + name)
+                os.replace(temporary, archive_path)
+                if not archive_path.is_file() or archive_path.stat().st_size <= 0:
+                    raise IOError("Private archive output is empty")
+                results.append(archive_path)
+            except Exception:
+                temporary.unlink(missing_ok=True)
+                raise
+        return results
+
     def export_archive(self,destination:str|Path)->Path:
         dest=Path(destination);dest.parent.mkdir(parents=True,exist_ok=True);tmp=dest.with_suffix(dest.suffix+".tmp");state_tmp=self.archive_state_path.with_suffix(".zip.tmp")
         previous,old_manifest=self._read_previous();merged=dict(previous);current=self._collect_files()
+        # Remove any legacy private histories previously accumulated in a common archive.
+        for name in list(merged):
+            if name.startswith("yj64-workspace/histories/"):
+                del merged[name]
         for name,data in current.items():
             if name.startswith("yj64-workspace/chats/") and name.endswith(".json") and name in merged:data=self._merge_history(merged[name],data)
             merged[name]=data
