@@ -445,7 +445,7 @@ def validate_archive_system():
 EXPECTED-GIT-BLOB-SHA:main.py=b3651dc053ee29ed099483cde2624bf7c87b72a4
 EXPECTED-GIT-BLOB-SHA:chat_workspace.py=41201f85eeb892be09dd22c8b838e0195ba0cc1b
 EXPECTED-GIT-BLOB-SHA:yj64_persistent_core.py=bf7bfffb6e0063ce09690c32146280c368b3cac8
-EXPECTED-GIT-BLOB-SHA:buildozer.spec=974e7ac426db7973ff4feddbcc37c477319df750
+EXPECTED-GIT-BLOB-SHA:buildozer.spec=9ae2a656d9b91c81e739a389a29c4d16c7c7c92f
 
 После каждого согласованного переноса изменения в рабочие файлы
 контрольные SHA должны быть обновлены по фактическому содержимому.
@@ -907,7 +907,7 @@ GUARD VALIDATION И ANDROID BUILD НЕ ЗАПУСКАЛИСЬ.
 PATCH IMPLEMENTATION RECORD — YJ64-REMOTE-RENAME-RESTORED-CONTEXT-002
 APPROVED BY OWNER: 2026-10-31
 TARGET: main.py; buildozer.spec; .github/workflows/android-apk.yml
-VERSION: 0.1.33
+VERSION: 0.1.34
 
 EXACT ORIGINAL FRAGMENTS VERIFIED AGAINST WORKING BRANCH BEFORE EDIT:
 - _open_remote_participant(): exact import/client initialization block.
@@ -1180,4 +1180,4 @@ KNOWN LIMITATIONS / REQUIRED FOLLOW-UP:
 - Device-level MediaStore operation, file-manager visibility and failure paths require Android runtime testing.
 - Private archive ZIPs group histories by filename and agent records by runner. This is not encryption or an access-control boundary after a user copies the ZIP.
 
-STATUS: WORKING FILES UPDATED; GUARD VALIDATION AND TESTS PENDING.
+STATUS: IMPLEMENTED ON WORKING BRANCH; VERSION 0.1.34; GUARD VALIDATION PENDING.
