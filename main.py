@@ -400,7 +400,8 @@ class YJ64BaseApp(App):
         content = BoxLayout(orientation="vertical", spacing=8, padding=12)
         popup = Popup(title="YJ-64 MENU", content=content, size_hint=(0.88, 0.62))
         actions = [
-            ("СОЗДАТЬ АРХИВ ПАМЯТИ", self._create_memory_archive),
+            ("СОЗДАТЬ АРХИВ В ЗАГРУЗКАХ", self._auto_export_download_archive),
+            ("СОЗДАТЬ АРХИВ ВЫБОРОМ ПАПКИ", self._create_memory_archive),
             ("ВОССТАНОВИТЬ ИЗ ZIP", self._choose_memory_archive),
             ("НАСТРОЙКИ ЧАТА: ШРИФТ И ИМЕНА", self._open_chat_appearance_settings),
             (self._t(5), self._open_tools_menu),
@@ -562,14 +563,23 @@ class YJ64BaseApp(App):
             self._archive_auto_export_error = ""
         except Exception as exc:
             self._archive_auto_export_error = f"{type(exc).__name__}: {exc}"
-            self._append_report("memory_archive_auto_download_failed",
-                                error_type=type(exc).__name__, error=str(exc),
-                                location="Download/YJ-64")
+            self.status.text = (
+                "Автосохранение архива не удалось: "
+                + self._archive_auto_export_error
+            )
+            self._append_report(
+                "memory_archive_auto_download_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                location="Download/YJ-64",
+            )
             if uri is not None:
                 try:
                     from jnius import autoclass
                     PythonActivity = autoclass("org.kivy.android.PythonActivity")
-                    PythonActivity.mActivity.getContentResolver().delete(uri, None, None)
+                    PythonActivity.mActivity.getContentResolver().delete(
+                        uri, None, None
+                    )
                 except Exception:
                     pass
         finally:
