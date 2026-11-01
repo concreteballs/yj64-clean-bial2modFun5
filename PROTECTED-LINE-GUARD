@@ -3320,15 +3320,16 @@ ORIGINAL FRAGMENT END
 NEW FRAGMENT BEGIN
             private_context = list(self.private_histories.get(participant_name, []))
             request_message = self._practical_instructions(message)
-            request_grant = self.permission_manager.issue_grant(
-                actor_id=self.owner_id,
-                subject_id=self.owner_id,
-                resource="private-chat:" + private_chat_id,
-                action="read",
-                ttl_seconds=120,
-                scope=private_chat_id,
-            )
+            request_grant = None
             try:
+                request_grant = self.permission_manager.issue_grant(
+                    actor_id=self.owner_id,
+                    subject_id=self.owner_id,
+                    resource="private-chat:" + private_chat_id,
+                    action="read",
+                    ttl_seconds=120,
+                    scope=private_chat_id,
+                )
                 request_context = self.context_manager.build(
                     route_id=route_id,
                     mode="full_history",
@@ -3340,10 +3341,21 @@ NEW FRAGMENT BEGIN
                     ],
                 )
                 request_history = request_context["messages"]
-            finally:
-                self.permission_manager.revoke_grant(
-                    actor_id=self.owner_id, grant_id=request_grant
+            except Exception as exc:
+                send.disabled = False
+                output.text += f"\\n\\nPRIVATE ACCESS DENIED: {type(exc).__name__}: {exc}"
+                self._append_report(
+                    "participant_private_context_denied",
+                    participant=participant_name,
+                    route_id=route_id,
+                    error_type=type(exc).__name__,
                 )
+                return
+            finally:
+                if request_grant:
+                    self.permission_manager.revoke_grant(
+                        actor_id=self.owner_id, grant_id=request_grant
+                    )
 NEW FRAGMENT END
 
 ACCEPTANCE:
