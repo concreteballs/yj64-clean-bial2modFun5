@@ -233,6 +233,15 @@ class YJ64BaseApp(App):
         self.report_path = Path(self.user_data_dir) / REPORT_RELATIVE_PATH
         from yj64_persistent_core import PersistentCore
         self.persistent_core = PersistentCore(self.user_data_dir)
+        from permission_manager import PermissionManager
+        self.owner_id = PermissionManager.load_or_create_owner_id(self.user_data_dir)
+        self.permission_manager = PermissionManager(self.user_data_dir, self.owner_id)
+        from semantic_memory import SemanticMemory
+        self.semantic_memory = SemanticMemory(self.user_data_dir)
+        from system_chat import SystemChatStore
+        self.system_chat_store = SystemChatStore(self.user_data_dir, self.owner_id)
+        from context_manager import ContextManager
+        self.context_manager = ContextManager()
         self._previous_excepthook = sys.excepthook
         sys.excepthook = self._handle_uncaught_exception
         self._previous_thread_excepthook = getattr(threading, "excepthook", None)
