@@ -8,6 +8,7 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.security.keystore.KeyGenParameterSpec;
@@ -91,6 +92,9 @@ public class MonitorActivity extends Activity {
         root.addView(status, new LinearLayout.LayoutParams(-1, 0, 1));
 
         addButton(root, "LAUNCH YJ-64", v -> launchBase());
+        addButton(root, "CHECK BASE STATUS", v -> callBaseCommand("get_status"));
+        addButton(root, "FLUSH BASE REPORT", v -> callBaseCommand("request_report_flush"));
+        addButton(root, "BASE DIAGNOSTIC SNAPSHOT", v -> callBaseCommand("request_diagnostic_snapshot"));
         addButton(root, "REFRESH CRASH REPORT", v -> refreshDiagnostics());
         addButton(root, "COPY DIAGNOSTIC REPORT", v -> copyReport());
         addButton(root, "CONFIGURE GITHUB UPLOAD", v -> configureToken());
@@ -141,6 +145,52 @@ public class MonitorActivity extends Activity {
             return "Report read failed: " + e.getClass().getSimpleName();
         }
         return result.toString();
+    }
+
+    private void callBaseCommand(String command) {
+        if (!("get_status".equals(command)
+                || "request_report_flush".equals(command)
+                || "request_diagnostic_snapshot".equals(command))) {
+            status.setText("Rejected unknown Base IPC command.");
+            return;
+        }
+        String requestId = UUID.randomUUID().toString().replace("-", "");
+        try {
+            JSONObject request = new JSONObject();
+            request.put("protocol", "yj64.monitor-command.v1");
+            request.put("request_id", requestId);
+            request.put("command", command);
+            request.put("created_ms", System.currentTimeMillis());
+            request.put("args", new JSONObject());
+            Bundle extras = new Bundle();
+            extras.putString("request_json", request.toString());
+            Bundle response = getContentResolver().call(
+                Uri.parse("content://org.blackmirror.blackmirror.diagnostics"),
+                "execute_command", null, extras
+            );
+            if (response == null || !response.getBoolean("ok", false)
+                    || !requestId.equals(response.getString("request_id"))) {
+                String error = response == null ? "provider_returned_null"
+                    : String.valueOf(response.getString("error"));
+                throw new SecurityException(error);
+            }
+            JSONObject payload = new JSONObject(
+                String.valueOf(response.getString("result_json"))
+            );
+            appendEvent("base_ipc_command_succeeded",
+                new JSONObject().put("command", command)
+                    .put("request_id", requestId).toString());
+            status.setText("BASE IPC: " + command + "\n"
+                + payload.toString(2) + "\n\n" + reportSummary());
+        } catch (Exception error) {
+            appendEvent("base_ipc_command_failed",
+                new JSONObject().put("command", command)
+                    .put("request_id", requestId)
+                    .put("error_type", error.getClass().getSimpleName())
+                    .put("message", String.valueOf(error.getMessage())).toString());
+            status.setText("Base IPC failed: " + error.getClass().getSimpleName()
+                + "\n" + String.valueOf(error.getMessage()) + "\n\n" + reportSummary());
+        }
     }
 
     private void launchBase() {

@@ -606,7 +606,3457 @@ TESTS:
 6. Ошибка после исчерпания попытки записывается в gateway_request_failed.
 
 
+
+---
+
+PATCH-ID: Q003-G-IPC-BASE-TO-MONITOR-001
+
+TARGET FILES:
+- monitor-app/app/src/main/java/org/blackmirror/yj64monitor/DiagnosticReportProvider.java
+- monitor-app/app/src/main/AndroidManifest.xml
+- services/internal_monitor.py
+- config/bridge.json
+- buildozer.spec
+
+PATCH STATUS:
+SPECIFICATION ADDED — executable replacement fragments still require
+exact-source capture and implementation review. Do not transfer this
+specification as if it were completed IPC code.
+
+PURPOSE:
+
+Завершить направление Base -> Monitor на основе существующего
+DiagnosticReportProvider. Сохранить durable acknowledgement и spool
+повторной доставки, но устранить слабые места текущего контракта.
+
+REQUIRED IMPLEMENTATION:
+
+1. Зафиксировать протокол и версию IPC, допустимые методы и размер payload.
+2. Проверять вызывающий UID, package name и подпись приложения
+   (сопоставление сертификата/подписи, а не только имени пакета).
+3. Заменить protectionLevel=normal на согласованную signature-level
+   защиту; проверить, что оба APK подписаны совместимым сертификатом
+   и что permission действительно запрашивается Base.
+4. Проверять схему, типы обязательных полей, report_id, timestamp,
+   agent и размер каждой записи до записи в JSONL.
+5. Запись должна оставаться append-only, flush + fsync до ok=true.
+6. Повторная доставка должна быть идемпотентной по report_id:
+   повтор одного сообщения не создаёт дубликат.
+7. Ответ provider должен содержать protocol_version, accepted report_id
+   и явный код отказа. Не возвращать ok=true до durable persistence.
+8. services/internal_monitor.py сохраняет spool при любой ошибке,
+   подтверждает только точный report_id и продолжает с прежнего offset.
+9. Таймауты и retry ограничены; не блокировать UI-поток.
+10. Секреты, токены и содержимое личных чатов не включать в диагностические
+    события по умолчанию.
+
+TESTS / ACCEPTANCE:
+
+- Только доверенный Base APK с ожидаемой подписью может передать отчёт.
+- Посторонний UID, пакет с неверной подписью и отсутствие permission
+  получают отказ.
+- Неверная схема, пустой report_id и oversized payload отклоняются.
+- После аварийного завершения подтверждённая запись уже находится на диске.
+- Повтор report_id не создаёт второй JSONL record.
+- При недоступном Monitor spool сохраняется и позднее передаётся без потерь
+  и изменения порядка.
+- Невозможность IPC не приводит к остановке Base App.
+
+---
+
+PATCH-ID: Q003-G-IPC-MONITOR-TO-BASE-002
+
+TARGET FILES:
+- android_src/DiagnosticMonitorProvider.java (NEW FILE)
+- buildozer.spec
+- services/internal_monitor.py
+- monitor-app/app/src/main/java/org/blackmirror/yj64monitor/MonitorActivity.java
+- monitor-app/app/src/main/AndroidManifest.xml
+
+PATCH STATUS:
+SPECIFICATION ADDED — new provider and manifest fragments must be authored
+and reviewed before this patch is transferable.
+
+PURPOSE:
+
+Добавить обратное направление Monitor -> Base. Сейчас имеющийся provider
+принимает отчёты Base в Monitor; это не является двусторонним IPC.
+
+REQUIRED IMPLEMENTATION:
+
+1. Добавить ContentProvider внутри Base APK с отдельным authority,
+   отдельным signature permission и явным экспортом только для Monitor.
+2. Зарегистрировать provider через Android manifest overlay, используемый
+   текущей конфигурацией Buildozer; не создавать второй конфликтующий
+   provider authority.
+3. В Monitor добавить клиент вызова Base provider и проверять ответ.
+4. Разрешить только ограниченный набор типизированных операций:
+   monitor_ping, submit_monitor_event, request_status.
+   Никакого произвольного вызова методов, shell-команд, Python-кода,
+   файловых путей или произвольного Intent от удалённого вызывающего.
+5. Любые операции, меняющие состояние Base, должны проходить через
+   PermissionManager и проверку actor/subject/resource/action/scope.
+6. Не передавать владельческие секреты и private histories через IPC.
+7. Проверять calling UID/package/signature на стороне Base provider.
+8. Ввести request_id, protocol_version, timestamp, ограничение payload,
+   durable acknowledgement и идемпотентность повторов.
+9. Monitor должен показывать раздельно состояния Base reachable,
+   permission denied, protocol mismatch и timeout.
+10. Отказ или отсутствие Monitor не должны блокировать обычный запуск Base.
+
+TESTS / ACCEPTANCE:
+
+- Monitor может получить только разрешённый статус Base.
+- Постороннее приложение не может вызвать Base provider.
+- Команда вне allowlist отклоняется.
+- Команда без действующего grant отклоняется и попадает в audit.
+- Повтор request_id не выполняет операцию повторно.
+- При выключенном/недоступном Base Monitor корректно показывает offline.
+- Проверены обе стороны IPC на реальных Android APK, а не только mock-тестом.
+
+---
+
+PATCH-ID: Q003-H-PERMISSION-ENFORCEMENT-001
+
+TARGET FILES:
+- main.py
+- message_distributor.py
+- llm_api.py
+- chat_workspace.py
+- yj64_persistent_core.py
+- services/internal_monitor.py
+- android_src/DiagnosticMonitorProvider.java
+- monitor-app/app/src/main/java/org/blackmirror/yj64monitor/DiagnosticReportProvider.java
+
+PATCH STATUS:
+SPECIFICATION ADDED — exact source fragments and call-site replacements
+must be captured separately for every target before implementation.
+
+PURPOSE:
+
+Подключить уже подготовленный PermissionManager к фактическим точкам
+операций. Наличие класса PermissionManager и его bootstrap в main.py
+не является защитой, пока операция может выполниться без require/check.
+
+REQUIRED IMPLEMENTATION:
+
+1. Ввести единый helper приложения, который передаёт в PermissionManager
+   доверенные requester_id, resource, action и scope.
+2. Default Deny: отсутствие, повреждение или неоднозначность grant/store
+   означает отказ; никаких автоматических grant при старте.
+3. UI: проверять разрешение до открытия/чтения/изменения private chat,
+   local skills, настроек, owner instructions и permission grants.
+4. Router: проверять право до отправки сообщения провайдеру; subject
+   определяется доверенным route_id, а не display name или текстом модели.
+5. Private history: отдельные read/write проверки до каждого чтения,
+   изменения, удаления и экспорта; проверять owner_id/user_id и chat_id.
+6. Common/private archive: отдельные read/export grants до сбора файлов,
+   до создания ZIP и перед публикацией через MediaStore/SAF.
+7. Agent tools: проверять каждый tool invocation по типу операции;
+   запрещать выполнение до проверки, а не только регистрировать отказ после.
+8. SystemChatStore и SemanticMemory: владелец управляет инструкциями;
+   участник получает только свой participant_id scope.
+9. IPC: обе стороны проверяют право на каждую state-changing операцию.
+10. Service management: start/stop/reconfigure internal monitor требует
+    service_management grant.
+11. Build/publish/commit относятся к отдельным действиям и не получают
+    разрешение из обычного read/write grant.
+12. Аудитировать allow и deny с operation_id; не записывать в audit
+    содержимое приватных сообщений, API keys и токены.
+13. Ни один exception в permission check не должен приводить к fail-open.
+14. Не считать PermissionManager OS sandbox: он защищает прикладной
+    workflow, но не изолирует вредоносный код внутри того же UID/process.
+
+TESTS / ACCEPTANCE:
+
+- Для каждого защищённого call site есть тест, доказывающий отказ без grant.
+- Grant с неверным subject/resource/action/scope не подходит.
+- Просроченный и отозванный grant не позволяет операцию.
+- Ошибка/повреждение permission store приводит к отказу без перезаписи.
+- UI, router, archive, agent tools, IPC и service management проверены.
+- Тесты подтверждают, что после отказа побочный эффект не произошёл.
+- Аудит фиксирует allow/deny и operation_id без утечки private content.
+
+---
+
+PATCH-ID: Q003-F-UNIVERSAL-ROUTER-CONTEXT-001
+
+TARGET FILES:
+- main.py
+- message_distributor.py
+- llm_api.py
+- llm_settings.py
+- context_manager.py
+- semantic_memory.py
+- system_chat.py
+
+PATCH STATUS:
+SPECIFICATION ADDED — provider request adapters and exact source fragments
+must be prepared before this patch is transferable.
+
+PURPOSE:
+
+Подключить выбранный режим контекста и правильные system instructions
+к каждому фактически выбранному route/provider/model, а не только к
+отдельному провайдеру или тестовому пути.
+
+REQUIRED IMPLEMENTATION:
+
+1. Единая точка подготовки запроса получает trusted route_id, выбранный
+   provider/model, transport mode (text/agent), context mode и scope.
+2. Контекст строится через ContextManager из правильных источников:
+   common history для общего диалога; private history только для текущего
+   private chat; participant-scoped semantic memory только текущего route.
+3. Owner instructions, participant system instructions, participant
+   system chat, semantic memory, recent messages и raw history остаются
+   отдельными слоями с provenance; нельзя сливать их в один неразличимый
+   список до проверки scope.
+4. Каждый provider adapter преобразует системный слой в нативный формат
+   API этого провайдера. Нельзя отправлять role=system как обычное user
+   сообщение там, где API имеет отдельное поле system/developer instruction.
+5. Для каждого провайдера сохраняется исходный смысл ролей и порядок
+   сообщений; неподдерживаемые поля удаляются только из транспортной
+   копии, исходная локальная история не меняется.
+6. Одинаковая подготовка контекста применяется ко всем моделям, выбранным
+   пользователем, включая последующие новые provider adapters.
+7. Ошибка контекста, неизвестный mode или превышение настроенного бюджета
+   возвращает явную ошибку и не вызывает fallback на другого участника.
+8. Full History не обрезается молча. Если выбранный режим невозможно
+   исполнить целиком, возвращается диагностируемая ошибка.
+9. Не вводить сейчас provider-specific tokenizer. До отдельного решения
+   владельца token_counter остаётся явно обозначенной оценкой/лимитом
+   приложения, не гарантией provider token limit.
+10. В запросах и отчётах фиксировать route_id, provider, model,
+    context_mode и provenance summary без публикации private message text.
+
+TESTS / ACCEPTANCE:
+
+- Набор контрактных тестов проходит для каждого поддерживаемого provider adapter.
+- Один и тот же набор исходных слоёв сохраняет одинаковую семантику
+  для всех выбранных моделей.
+- Private message никогда не попадает в common/другой participant payload.
+- Participant 1 не получает system chat/memory Participant 2 и наоборот.
+- Owner instructions нельзя изменить из ответа модели.
+- text и agent используют одинаковую политику контекста, различается
+  только транспортная упаковка.
+- Провайдерский adapter не изменяет сохранённую историю.
+- Нет silent fallback на Gemini или другой route при ошибке выбранного route.
+- Тесты явно маркируют token count как app estimate до отдельной интеграции
+  точных provider tokenizers.
+
+---
+
+PATCH-ID: Q003-ISOLATION-END-TO-END-TESTS-001
+
+TARGET FILES:
+- tests/test_permission_integration.py (NEW FILE)
+- tests/test_private_context_isolation.py (NEW FILE)
+- tests/test_router_context_contract.py (NEW FILE)
+- tests/test_archive_privacy.py (NEW FILE)
+- tests/test_diagnostic_ipc_contract.py (NEW FILE)
+- main.py
+- message_distributor.py
+- llm_api.py
+- chat_workspace.py
+- yj64_persistent_core.py
+- permission_manager.py
+- semantic_memory.py
+- context_manager.py
+- system_chat.py
+
+PATCH STATUS:
+SPECIFICATION ADDED — test implementations must exercise real integration
+entry points; isolated class-only unit tests are insufficient.
+
+PURPOSE:
+
+Добавить сквозные тесты фактической изоляции данных и исполнения разрешений.
+Тесты должны доказывать отсутствие утечки и отсутствие побочных эффектов
+при отказе, а не только успешное создание объектов.
+
+REQUIRED TEST MATRIX:
+
+1. Common chat -> только common context и разрешённые общие memory items.
+2. Private chat A -> только chat A, owner-authorized instructions и память
+   с тем же participant/chat scope.
+3. Private chat B -> не содержит ни одного message_id/content из chat A.
+4. Participant 1 -> не получает system chat, private history или memory
+   Participant 2; обратное также проверяется.
+5. Общий ZIP -> не включает histories/, private metadata, private system
+   chats и participant-private memory.
+6. Private ZIP -> содержит только один разрешённый chat_id и не содержит
+   другие чаты/общую историю без отдельного разрешения.
+7. Неопределённые/неполные chat metadata -> не экспортируются ни в common,
+   ни в private archive до явной классификации.
+8. Запросы всех provider adapters проверяются на отсутствие чужих private
+   messages, owner secrets и неподходящих system instructions.
+9. Deny на read/write/export/publish/router/tool/service action доказывает,
+   что операция и побочные эффекты не произошли.
+10. Повреждённое хранилище permissions/memory/system chat не приводит
+    к созданию пустой замены или к разрешению доступа.
+11. IPC тестирует обе стороны, подпись/UID, allowlist, replay/idempotency,
+    timeout и восстановление после spool.
+12. Проверки выполняются на уровне реальных application entry points;
+    mocks допускаются для внешней сети, но не вместо внутренней политики
+    доступа и выбора контекста.
+
+ACCEPTANCE GATE:
+
+- Каждый тест содержит позитивный и негативный сценарий.
+- Для изоляции используются уникальные canary message_id и секретные
+  строки-маркеры, проверяемые во всех собранных payload/ZIP.
+- Проверяются JSONL, ZIP manifest, provider request payload и IPC payload.
+- CI обязан запускать эти тесты и завершаться ошибкой при любом нарушении.
+- До прохождения всего набора Q003-G/H и private-isolation нельзя считать
+  Q-003 завершённым и нельзя объявлять его production-ready.
+
+
+
 ============================================================
+
+========================================================================
+Q003 IMPLEMENTATION CODE APPENDIX — CODE IS STORED IN GUARD ONLY
+========================================================================
+
+Статус: подготовлены конкретные исходные фрагменты для последующего переноса.
+Ограничение текущего коммита: изменяется только PROTECTED-LINE-GUARD.
+Ни один Python/Java/Manifest/CI/test файл этим коммитом не изменяется.
+Код ниже является source material для точечных патчей, а не заявлением,
+что функциональность уже подключена к приложению.
+
+-----------------------------------------------------------------------
+IMPLEMENTATION: Q003-G-IPC-BASE-TO-MONITOR-001
+TARGET: services/diagnostic_ipc.py (новый модуль; Base-side client)
+-----------------------------------------------------------------------
+
+ORIGINAL FRAGMENT BEGIN
+[NEW FILE — no existing fragment]
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+"""Authenticated, bounded, idempotent Base -> Monitor report transport."""
+from __future__ import annotations
+
+import json
+import re
+import time
+import uuid
+from typing import Any
+
+SCHEMA = "yj64.diagnostic.v1"
+MAX_REPORT_BYTES = 64 * 1024
+SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{8,80}$")
+ALLOWED_TOP = {"schema", "agent", "event", "timestamp_ms", "report_id", "data"}
+FORBIDDEN_KEYS = {
+    "api_key", "token", "access_token", "refresh_token", "authorization",
+    "private_messages", "message_content", "chat_history", "prompt",
+}
+
+
+def _clean(value: Any, depth: int = 0) -> Any:
+    if depth > 8:
+        raise ValueError("payload nesting limit exceeded")
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            name = str(key)
+            if name.lower() in FORBIDDEN_KEYS:
+                continue
+            out[name[:80]] = _clean(item, depth + 1)
+        return out
+    if isinstance(value, list):
+        if len(value) > 256:
+            raise ValueError("payload list limit exceeded")
+        return [_clean(x, depth + 1) for x in value]
+    if isinstance(value, str):
+        return value[:4096]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    raise TypeError("unsupported diagnostic payload type")
+
+
+def validate_report(report: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(report, dict) or set(report) - ALLOWED_TOP:
+        raise ValueError("invalid report envelope")
+    if report.get("schema") != SCHEMA:
+        raise ValueError("unsupported diagnostic schema")
+    if not SAFE_ID.fullmatch(str(report.get("report_id", ""))):
+        raise ValueError("invalid report_id")
+    if not str(report.get("event", "")).strip():
+        raise ValueError("event is required")
+    data = _clean(report.get("data", {}))
+    result = {
+        "schema": SCHEMA,
+        "agent": str(report.get("agent", "yj64-base-application"))[:80],
+        "event": str(report["event"])[:120],
+        "timestamp_ms": int(report.get("timestamp_ms") or time.time() * 1000),
+        "report_id": str(report["report_id"]),
+        "data": data,
+    }
+    encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()
+    if len(encoded) > MAX_REPORT_BYTES:
+        raise ValueError("diagnostic report exceeds size limit")
+    return result
+
+
+class BaseToMonitorClient:
+    """Thin Android ContentResolver client; provider performs caller checks."""
+
+    def __init__(self, context: Any, authority: str):
+        self.context = context
+        self.authority = authority
+
+    def deliver(self, report: dict[str, Any]) -> dict[str, Any]:
+        clean = validate_report(report)
+        from jnius import autoclass
+        Uri = autoclass("android.net.Uri")
+        Bundle = autoclass("android.os.Bundle")
+        extras = Bundle()
+        extras.putString("report_json", json.dumps(clean, ensure_ascii=False))
+        result = self.context.getContentResolver().call(
+            Uri.parse("content://" + self.authority),
+            "receive_report", None, extras
+        )
+        if result is None:
+            raise RuntimeError("monitor provider returned no acknowledgement")
+        accepted = bool(result.getBoolean("ok", False))
+        ack_id = str(result.getString("report_id") or "")
+        if not accepted or ack_id != clean["report_id"]:
+            raise RuntimeError(
+                str(result.getString("error") or "monitor acknowledgement mismatch")
+            )
+        return {"ok": True, "report_id": ack_id}
+
+
+def new_report(event: str, **data: Any) -> dict[str, Any]:
+    return validate_report({
+        "schema": SCHEMA,
+        "agent": "yj64-base-application",
+        "event": event,
+        "timestamp_ms": int(time.time() * 1000),
+        "report_id": uuid.uuid4().hex,
+        "data": data,
+    })
+NEW FRAGMENT END
+
+REQUIRED NATIVE PROVIDER CONTRACT (must be enforced in existing
+monitor-app DiagnosticReportProvider.java; not satisfied by Python alone):
+1. exported provider requires signature-level permission, not protectionLevel=normal;
+2. compare Binder.getCallingUid() package set and signing certificate digest
+   against the installed Base package; reject shared/unknown callers;
+3. reject oversized/malformed JSON before persistence;
+4. persist report atomically and fsync/close before returning ok=true;
+5. SQLite UNIQUE(report_id) or equivalent makes retries idempotent;
+6. ACK returns exactly the persisted report_id;
+7. never persist prompts, chat text, private histories, or credentials.
+8. retry only on provider unavailable/transport failure; retain original report_id.
+
+TESTS:
+- malformed schema, unknown envelope key, invalid report_id and >64 KiB rejected;
+- nested forbidden keys removed; strings/list/depth bounded;
+- wrong caller UID/signature rejected by native instrumentation test;
+- duplicate report_id returns stable success without duplicate row;
+- ACK is never sent before durable write.
+
+-----------------------------------------------------------------------
+IMPLEMENTATION: Q003-G-IPC-MONITOR-TO-BASE-002
+TARGET: services/monitor_command_client.py (new Monitor-side client)
+-----------------------------------------------------------------------
+
+ORIGINAL FRAGMENT BEGIN
+[NEW FILE — no existing fragment]
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+"""Allowlisted Monitor -> Base command request client."""
+from __future__ import annotations
+
+import json
+import re
+import time
+import uuid
+from typing import Any
+
+PROTOCOL = "yj64.monitor-command.v1"
+MAX_REQUEST_BYTES = 16 * 1024
+ALLOWED_COMMANDS = {
+    "get_status",
+    "request_report_flush",
+    "request_diagnostic_snapshot",
+}
+ID_RE = re.compile(r"^[a-f0-9]{32}$")
+
+
+def make_request(command: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
+    if command not in ALLOWED_COMMANDS:
+        raise ValueError("command is not allowlisted")
+    if args is not None and not isinstance(args, dict):
+        raise TypeError("args must be an object")
+    request = {
+        "protocol": PROTOCOL,
+        "request_id": uuid.uuid4().hex,
+        "command": command,
+        "created_ms": int(time.time() * 1000),
+        "args": args or {},
+    }
+    raw = json.dumps(request, separators=(",", ":"), ensure_ascii=False).encode()
+    if len(raw) > MAX_REQUEST_BYTES:
+        raise ValueError("request too large")
+    return request
+
+
+class MonitorToBaseClient:
+    def __init__(self, context: Any, authority: str):
+        self.context, self.authority = context, authority
+
+    def call(self, command: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
+        from jnius import autoclass
+        request = make_request(command, args)
+        Uri = autoclass("android.net.Uri")
+        Bundle = autoclass("android.os.Bundle")
+        extras = Bundle()
+        extras.putString("request_json", json.dumps(request))
+        result = self.context.getContentResolver().call(
+            Uri.parse("content://" + self.authority),
+            "execute_command", None, extras
+        )
+        if result is None or not result.getBoolean("ok", False):
+            raise RuntimeError("Base rejected or did not acknowledge command")
+        if str(result.getString("request_id") or "") != request["request_id"]:
+            raise RuntimeError("Base command acknowledgement mismatch")
+        payload = result.getString("result_json") or "{}"
+        decoded = json.loads(str(payload))
+        if not isinstance(decoded, dict):
+            raise RuntimeError("invalid Base command response")
+        return decoded
+NEW FRAGMENT END
+
+REQUIRED BASE PROVIDER CONTRACT (new android_src Java provider, wired via
+buildozer.spec and merged manifest in a separate approved source patch):
+- enforce android:exported=true plus a dedicated signature permission;
+- validate Binder caller UID, installed package and signing certificate digest;
+- accept only PROTOCOL and ALLOWED_COMMANDS above; reject unknown fields/commands;
+- bound request size, argument depth and execution time;
+- use request_id as idempotency key; persist completed result before ACK;
+- get_status is read-only; flush/snapshot commands must not expose message bodies,
+  API keys, private chat content or filesystem paths outside app-private scope;
+- no arbitrary method names, paths, shell commands or Python expressions.
+TESTS:
+- unknown command and altered protocol rejected;
+- wrong UID/signature rejected;
+- duplicate request_id executes at most once;
+- response request_id must match;
+- private-chat canary and API-key canary never appear in response.
+
+-----------------------------------------------------------------------
+IMPLEMENTATION: Q003-H-PERMISSION-ENFORCEMENT-001
+TARGET: permission_manager.py (new unified enforcement module)
+-----------------------------------------------------------------------
+
+ORIGINAL FRAGMENT BEGIN
+[NEW FILE — no existing fragment]
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+"""Default-deny permission checks for YJ-64 protected operations."""
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+import time
+import uuid
+from pathlib import Path
+from threading import RLock
+from typing import Any
+
+class PermissionDenied(PermissionError):
+    pass
+
+
+class PermissionManager:
+    VALID_SCOPES = {"common", "private", "owner", "participant", "diagnostics"}
+    VALID_ACTIONS = {
+        "chat.read", "chat.write", "private.read", "private.write",
+        "archive.common.export", "archive.private.export",
+        "archive.common.import", "archive.private.import",
+        "skills.read", "skills.write", "router.configure",
+        "participant.request", "system_chat.read", "system_chat.write",
+        "memory.read", "memory.write", "diagnostics.read",
+        "diagnostics.command",
+    }
+
+    def __init__(self, user_data_dir: str | Path, owner_id: str):
+        self.root = Path(user_data_dir)
+        self.owner_id = str(owner_id)
+        self.path = self.root / "yj64-permissions.json"
+        self.audit_path = self.root / "yj64-permission-audit.jsonl"
+        self._lock = RLock()
+        self.root.mkdir(parents=True, exist_ok=True)
+        if not self.path.exists():
+            self._atomic_write({"schema": "yj64.permissions.v1", "grants": []})
+
+    @staticmethod
+    def load_or_create_owner_id(user_data_dir: str | Path) -> str:
+        root = Path(user_data_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / "owner-identity.json"
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            value = str(data.get("owner_id", ""))
+            if not value:
+                raise RuntimeError("owner identity is invalid; refusing regeneration")
+            return value
+        value = uuid.uuid4().hex
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"schema": "yj64.owner.v1", "owner_id": value}),
+                       encoding="utf-8")
+        os.replace(tmp, path)
+        return value
+
+    def _read(self) -> dict[str, Any]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("permission store unreadable; default deny") from exc
+        if not isinstance(data, dict) or data.get("schema") != "yj64.permissions.v1":
+            raise RuntimeError("permission store invalid; default deny")
+        grants = data.get("grants")
+        if not isinstance(grants, list):
+            raise RuntimeError("permission grants invalid; default deny")
+        return data
+
+    def _atomic_write(self, data: dict[str, Any]) -> None:
+        fd, name = tempfile.mkstemp(prefix=".permissions-", dir=str(self.root))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(data, stream, ensure_ascii=False, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(name, self.path)
+        finally:
+            if os.path.exists(name):
+                os.unlink(name)
+
+    def grant(self, subject_id: str, action: str, scope: str,
+              granted_by: str) -> None:
+        if action not in self.VALID_ACTIONS or scope not in self.VALID_SCOPES:
+            raise ValueError("unknown permission action or scope")
+        if granted_by != self.owner_id:
+            raise PermissionDenied("only owner may change grants")
+        if not subject_id:
+            raise ValueError("subject_id required")
+        with self._lock:
+            data = self._read()
+            rows = [x for x in data["grants"] if not (
+                x.get("subject_id") == subject_id and x.get("action") == action
+                and x.get("scope") == scope)]
+            rows.append({"subject_id": subject_id, "action": action,
+                         "scope": scope, "granted_by": granted_by,
+                         "created_ms": int(time.time() * 1000)})
+            data["grants"] = rows
+            self._atomic_write(data)
+        self._audit("grant", subject_id, action, scope, True)
+
+    def revoke(self, subject_id: str, action: str, scope: str,
+               revoked_by: str) -> None:
+        if revoked_by != self.owner_id:
+            raise PermissionDenied("only owner may revoke grants")
+        with self._lock:
+            data = self._read()
+            data["grants"] = [x for x in data["grants"] if not (
+                x.get("subject_id") == subject_id and x.get("action") == action
+                and x.get("scope") == scope)]
+            self._atomic_write(data)
+        self._audit("revoke", subject_id, action, scope, True)
+
+    def check(self, subject_id: str, action: str, scope: str,
+              *, owner_action: bool = False) -> bool:
+        allowed = False
+        try:
+            if action not in self.VALID_ACTIONS or scope not in self.VALID_SCOPES:
+                raise PermissionDenied("unknown action or scope")
+            if owner_action and subject_id == self.owner_id:
+                allowed = True
+            else:
+                data = self._read()
+                allowed = any(
+                    x.get("subject_id") == subject_id
+                    and x.get("action") == action and x.get("scope") == scope
+                    and x.get("granted_by") == self.owner_id
+                    for x in data["grants"] if isinstance(x, dict)
+                )
+            if not allowed:
+                raise PermissionDenied(f"denied: {action} [{scope}]")
+            return True
+        finally:
+            self._audit("check", subject_id, action, scope, allowed)
+
+    def require(self, subject_id: str, action: str, scope: str,
+                *, owner_action: bool = False) -> None:
+        self.check(subject_id, action, scope, owner_action=owner_action)
+
+    def _audit(self, operation: str, subject_id: str, action: str,
+               scope: str, allowed: bool) -> None:
+        row = {"timestamp_ms": int(time.time() * 1000),
+               "operation": operation, "subject_id": str(subject_id)[:100],
+               "action": action, "scope": scope, "allowed": bool(allowed)}
+        self.audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.audit_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+NEW FRAGMENT END
+
+MANDATORY APPLICATION HOOKS (must be applied as exact guarded patches):
+- before common/private chat load/save, derive subject_id from authenticated app
+  identity and scope from persisted chat metadata; never infer authorization
+  from visible title or Participant display label;
+- before private history read/write and private request dispatch, require
+  private.read/private.write against exact chat_id scope;
+- before common/private archive export/import, require the matching archive
+  action; private archive owner_id and user_id must both match;
+- before skills write, router credential update, system-chat access, semantic
+  memory read/write and agent tool invocation, call require();
+- before either IPC provider executes a command, enforce diagnostics.command;
+- permission-store parse/I/O error means deny, never fall back to allow.
+IMPORTANT: current app has no connected permission manager. Do not mark this
+patch complete until all listed real call sites are guarded and tested.
+
+-----------------------------------------------------------------------
+IMPLEMENTATION: Q003-F-UNIVERSAL-ROUTER-CONTEXT-001
+TARGET: context_manager.py (new module; tokenizer implementation deferred)
+-----------------------------------------------------------------------
+
+ORIGINAL FRAGMENT BEGIN
+[NEW FILE — no existing fragment]
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+"""Provider-neutral, scope-aware context assembly for all router routes."""
+from __future__ import annotations
+
+import hashlib
+import json
+from typing import Any
+
+VALID_MODES = {"memory_only", "memory_recent", "full_history"}
+VALID_SCOPES = {"common", "private", "participant_system"}
+
+def _text(value: Any, limit: int = 20000) -> str:
+    return str(value or "")[:limit]
+
+def _message(row: dict[str, Any]) -> dict[str, str]:
+    role = str(row.get("role", "user"))
+    if role not in {"system", "user", "assistant"}:
+        role = "user"
+    return {"role": role, "content": _text(row.get("content"))}
+
+class ContextManager:
+    def build(self, *, route_id: str, mode: str,
+              owner_instructions: str = "",
+              participant_instructions: str = "",
+              participant_memory: str = "",
+              semantic_memory: str = "",
+              recent_history: list[dict[str, Any]] | None = None,
+              full_history: list[dict[str, Any]] | None = None,
+              private_history: list[dict[str, Any]] | None = None,
+              scope: str = "common",
+              authorized: bool = False) -> dict[str, Any]:
+        if mode not in VALID_MODES:
+            raise ValueError("unknown context mode")
+        if scope not in VALID_SCOPES:
+            raise ValueError("unknown context scope")
+        if scope == "private" and not authorized:
+            raise PermissionError("private context requires authorization")
+        if not route_id.startswith("route_"):
+            raise ValueError("invalid route identity")
+
+        instructions = []
+        if owner_instructions.strip():
+            instructions.append("OWNER INSTRUCTIONS:\n" + _text(owner_instructions))
+        if participant_instructions.strip():
+            instructions.append("PARTICIPANT SYSTEM INSTRUCTIONS:\n" +
+                                _text(participant_instructions))
+        if participant_memory.strip():
+            instructions.append("PARTICIPANT MEMORY:\n" + _text(participant_memory))
+        if semantic_memory.strip():
+            instructions.append("SEMANTIC MEMORY:\n" + _text(semantic_memory))
+
+        if mode == "memory_only":
+            history = []
+        elif mode == "memory_recent":
+            history = recent_history or []
+        else:
+            history = full_history or []
+
+        # Private requests must never fall back to common history (or vice versa).
+        if scope == "private":
+            history = private_history or []
+        normalized = [_message(x) for x in history if isinstance(x, dict)]
+        system_text = "\n\n".join(instructions)
+        fingerprint_data = {
+            "route_id": route_id, "mode": mode, "scope": scope,
+            "system": system_text, "history": normalized,
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(fingerprint_data, sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()
+        return {
+            "route_id": route_id, "mode": mode, "scope": scope,
+            "system_instructions": system_text,
+            "messages": normalized,
+            "context_fingerprint": fingerprint,
+            "source_counts": {"history": len(normalized),
+                              "system_sections": len(instructions)},
+        }
+NEW FRAGMENT END
+
+ROUTER INTEGRATION CONTRACT (llm_api.py):
+1. generate_response() must build one ContextManager envelope for every route.
+2. Provider adapter receives envelope; OpenAI-compatible chat endpoints map
+   system_instructions to a leading system message; Gemini maps it to
+   systemInstruction; native Mistral endpoint maps only to its documented
+   supported system field. Do not send private metadata or internal keys.
+3. Remove internal envelope fields (fingerprint/source_counts/scope) before
+   HTTP serialization. Never leak api_key or local paths into prompt.
+4. Preserve selected route_id/provider/model; no fallback to another participant.
+5. No silent truncation. The current implementation deliberately uses bounded
+   application strings only as a safety cap, NOT a token budget guarantee.
+6. Provider-specific tokenizer is explicitly deferred until owner supplies
+   the tokenizer design; do not add token counting or claim provider guarantees.
+7. Log only route_id, mode, scope, fingerprint and counts; never log prompt text.
+
+-----------------------------------------------------------------------
+IMPLEMENTATION: Q003-ISOLATION-END-TO-END-TESTS-001
+TARGET: tests/test_q003_isolation_contract.py (new test module)
+-----------------------------------------------------------------------
+
+ORIGINAL FRAGMENT BEGIN
+[NEW FILE — no existing fragment]
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+"""Q-003 security contract tests; use temporary app data, no network."""
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from permission_manager import PermissionManager, PermissionDenied
+from context_manager import ContextManager
+
+class Q003PermissionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.owner = PermissionManager.load_or_create_owner_id(self.root)
+        self.pm = PermissionManager(self.root, self.owner)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_default_deny(self):
+        with self.assertRaises(PermissionDenied):
+            self.pm.require("participant-1", "private.read", "private")
+
+    def test_owner_grant_and_revoke(self):
+        self.pm.grant("participant-1", "private.read", "private", self.owner)
+        self.pm.require("participant-1", "private.read", "private")
+        self.pm.revoke("participant-1", "private.read", "private", self.owner)
+        with self.assertRaises(PermissionDenied):
+            self.pm.require("participant-1", "private.read", "private")
+
+    def test_corrupt_store_denies(self):
+        self.pm.path.write_text("{broken", encoding="utf-8")
+        with self.assertRaises(RuntimeError):
+            self.pm.require("participant-1", "private.read", "private")
+
+class Q003ContextTests(unittest.TestCase):
+    def test_private_requires_authorization(self):
+        cm = ContextManager()
+        with self.assertRaises(PermissionError):
+            cm.build(route_id="route_1", mode="full_history",
+                     scope="private", private_history=[{"content":"CANARY"}])
+
+    def test_private_does_not_mix_common_history(self):
+        cm = ContextManager()
+        result = cm.build(route_id="route_1", mode="full_history",
+            scope="private", authorized=True,
+            private_history=[{"role":"user","content":"PRIVATE_CANARY"}],
+            full_history=[{"role":"user","content":"COMMON_CANARY"}])
+        text = json.dumps(result)
+        self.assertIn("PRIVATE_CANARY", text)
+        self.assertNotIn("COMMON_CANARY", text)
+
+    def test_memory_only_has_no_history(self):
+        result = ContextManager().build(route_id="route_2", mode="memory_only",
+            recent_history=[{"role":"user","content":"HISTORY_CANARY"}])
+        self.assertEqual(result["messages"], [])
+
+if __name__ == "__main__":
+    unittest.main()
+NEW FRAGMENT END
+
+ADDITIONAL REQUIRED E2E TESTS (must be added before acceptance):
+- private chat canary absent from common ZIP and common provider payload;
+- common chat canary absent from private ZIP and private provider payload;
+- API key canary absent from all diagnostic IPC payloads and audit logs;
+- each participant route keeps its own system instructions and memory;
+- actual UI, router, archive, agent-tool and IPC entry points deny by default;
+- monitor->base and base->monitor native provider instrumentation tests verify
+  caller UID/signature, replay/idempotency, durable ACK and payload limits;
+- test real app entry points, not only these isolated helper classes.
+- CI must compile every newly introduced module and run unittest discovery.
+- Android APK build remains manual and must not be run from this Guard-only commit.
+
+-----------------------------------------------------------------------
+IMPLEMENTATION COMPLETENESS / APPLICATION ORDER
+-----------------------------------------------------------------------
+
+1. Add native Base provider and native Monitor provider security changes.
+2. Add the two Python IPC clients and wire the existing Base->Monitor sender.
+3. Add PermissionManager and stable owner identity; preserve existing
+   self.report_path = Path(self.user_data_dir) / REPORT_RELATIVE_PATH
+   during main.py bootstrap edits.
+4. Guard every actual UI/router/archive/agent/system-chat/memory/IPC entry point.
+5. Add ContextManager to the central dispatch path and all provider adapters.
+6. Add the full E2E test set and CI gates.
+7. Run tests; inspect exact changed-file list; only then consider Android build.
+8. Do not mark Q-003 complete because helper modules import or APK builds.
+
+END OF Q003 IMPLEMENTATION CODE APPENDIX
+
+
+========================================================================
+Q003 NATIVE ANDROID IPC PROVIDER SOURCE — PREPARED, NOT YET INTEGRATED
+========================================================================
+
+Эти два Java-файла являются точными новыми исходниками. Они должны быть
+перенесены только после этой Guard-записи. Обе APK должны быть подписаны
+одним и тем же сертификатом: signature permission и SHA-256 signer check
+намеренно отклонят разные сертификаты. Не ослаблять защиту до normal.
+
+-----------------------------------------------------------------------
+TARGET: android_src/org/blackmirror/blackmirror/DiagnosticMonitorProvider.java
+ORIGINAL FRAGMENT BEGIN
+[NEW FILE]
+ORIGINAL FRAGMENT END
+NEW FRAGMENT BEGIN
+package org.blackmirror.blackmirror;
+
+import android.content.ContentProvider;
+import android.content.ContentValues;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.Signature;
+import android.content.pm.SigningInfo;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.Binder;
+import android.os.Build;
+import android.os.Bundle;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Set;
+
+public final class DiagnosticMonitorProvider extends ContentProvider {
+    private static final String MONITOR_PACKAGE = "org.blackmirror.yj64monitor";
+    private static final String PERMISSION =
+        "org.blackmirror.blackmirror.permission.MONITOR_COMMAND";
+    private static final String AUTHORITY = "org.blackmirror.blackmirror.diagnostics";
+    private static final String PROTOCOL = "yj64.monitor-command.v1";
+    private static final int MAX_BYTES = 16 * 1024;
+    private static final Set<String> COMMANDS = new HashSet<>(Arrays.asList(
+        "get_status", "request_report_flush", "request_diagnostic_snapshot"
+    ));
+    private static final Set<String> TOP_KEYS = new HashSet<>(Arrays.asList(
+        "protocol", "request_id", "command", "created_ms", "args"
+    ));
+
+    @Override public boolean onCreate() { return true; }
+
+    @Override public synchronized Bundle call(String method, String arg, Bundle extras) {
+        Bundle out = new Bundle();
+        String requestId = "";
+        try {
+            if (!"execute_command".equals(method)) throw new IllegalArgumentException("unsupported_method");
+            verifyCaller();
+            if (extras == null) throw new IllegalArgumentException("extras_missing");
+            String raw = extras.getString("request_json");
+            if (raw == null || raw.getBytes(StandardCharsets.UTF_8).length > MAX_BYTES)
+                throw new IllegalArgumentException("request_missing_or_oversized");
+            JSONObject request = new JSONObject(raw);
+            requireExactKeys(request, TOP_KEYS);
+            if (!PROTOCOL.equals(request.optString("protocol")))
+                throw new IllegalArgumentException("unsupported_protocol");
+            requestId = request.optString("request_id");
+            if (!requestId.matches("[a-f0-9]{32}"))
+                throw new IllegalArgumentException("invalid_request_id");
+            String command = request.optString("command");
+            if (!COMMANDS.contains(command)) throw new SecurityException("command_not_allowlisted");
+            JSONObject args = request.optJSONObject("args");
+            if (args == null || args.length() != 0)
+                throw new IllegalArgumentException("command_arguments_not_supported");
+            JSONObject result = readAck(requestId);
+            if (result == null) {
+                result = execute(command);
+                writeAck(requestId, result);
+            }
+            out.putBoolean("ok", true);
+            out.putString("request_id", requestId);
+            out.putString("result_json", result.toString());
+        } catch (Exception e) {
+            out.putBoolean("ok", false);
+            out.putString("request_id", requestId);
+            out.putString("error", e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage()));
+        }
+        return out;
+    }
+
+    private void verifyCaller() throws Exception {
+        if (getContext().checkCallingPermission(PERMISSION) != PackageManager.PERMISSION_GRANTED)
+            throw new SecurityException("signature_permission_denied");
+        int uid = Binder.getCallingUid();
+        String[] packages = getContext().getPackageManager().getPackagesForUid(uid);
+        if (packages == null || packages.length != 1 || !MONITOR_PACKAGE.equals(packages[0]))
+            throw new SecurityException("caller_uid_package_mismatch");
+        String base = signerDigest(getContext().getPackageName());
+        String monitor = signerDigest(MONITOR_PACKAGE);
+        if (!base.equals(monitor)) throw new SecurityException("caller_signing_certificate_mismatch");
+    }
+
+    private String signerDigest(String packageName) throws Exception {
+        PackageManager pm = getContext().getPackageManager();
+        PackageInfo info;
+        if (Build.VERSION.SDK_INT >= 28) {
+            info = pm.getPackageInfo(packageName, PackageManager.GET_SIGNING_CERTIFICATES);
+        } else {
+            info = pm.getPackageInfo(packageName, PackageManager.GET_SIGNATURES);
+        }
+        Signature[] signatures;
+        if (Build.VERSION.SDK_INT >= 28) {
+            SigningInfo signing = info.signingInfo;
+            if (signing == null) throw new SecurityException("signing_info_missing");
+            signatures = signing.getApkContentsSigners();
+        } else {
+            signatures = info.signatures;
+        }
+        if (signatures == null || signatures.length != 1)
+            throw new SecurityException("unexpected_signer_count");
+        byte[] digest = MessageDigest.getInstance("SHA-256").digest(signatures[0].toByteArray());
+        StringBuilder hex = new StringBuilder();
+        for (byte b : digest) hex.append(String.format("%02x", b & 0xff));
+        return hex.toString();
+    }
+
+    private JSONObject execute(String command) throws Exception {
+        File root = getContext().getFilesDir();
+        File reports = new File(root, "yj64-reports/yj64-report.jsonl");
+        JSONObject result = new JSONObject();
+        if ("get_status".equals(command)) {
+            result.put("status_available", new File(root, "diagnostic-agent-status.json").isFile());
+            result.put("base_package", getContext().getPackageName());
+        } else if ("request_report_flush".equals(command)) {
+            if (reports.isFile()) {
+                try (FileOutputStream stream = new FileOutputStream(reports, true)) {
+                    stream.flush();
+                    stream.getFD().sync();
+                }
+            }
+            result.put("flushed", true);
+            result.put("report_bytes", reports.isFile() ? reports.length() : 0);
+        } else if ("request_diagnostic_snapshot".equals(command)) {
+            long lines = 0;
+            if (reports.isFile()) {
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                        new FileInputStream(reports), StandardCharsets.UTF_8))) {
+                    while (reader.readLine() != null) lines++;
+                }
+            }
+            result.put("report_lines", lines);
+            result.put("report_bytes", reports.isFile() ? reports.length() : 0);
+            result.put("status_available", new File(root, "diagnostic-agent-status.json").isFile());
+        } else {
+            throw new SecurityException("unsupported_command");
+        }
+        return result;
+    }
+
+    private File ackFile() { return new File(getContext().getFilesDir(), "yj64-monitor-command-acks.json"); }
+
+    private JSONObject readAck(String id) throws Exception {
+        File file = ackFile();
+        if (!file.isFile()) return null;
+        JSONObject all = new JSONObject(readText(file, 256 * 1024));
+        JSONObject acks = all.optJSONObject("acks");
+        return acks == null ? null : acks.optJSONObject(id);
+    }
+
+    private void writeAck(String id, JSONObject result) throws Exception {
+        File file = ackFile();
+        JSONObject all = new JSONObject();
+        if (file.isFile()) {
+            try { all = new JSONObject(readText(file, 256 * 1024)); }
+            catch (Exception ignored) { all = new JSONObject(); }
+        }
+        JSONObject acks = all.optJSONObject("acks");
+        if (acks == null) acks = new JSONObject();
+        acks.put(id, result);
+        JSONArray ids = acks.names();
+        if (ids != null && ids.length() > 500) {
+            for (int i = 0; i < ids.length() - 500; i++) acks.remove(ids.getString(i));
+        }
+        all.put("schema", "yj64.monitor-command-acks.v1");
+        all.put("acks", acks);
+        File temp = new File(file.getParentFile(), file.getName() + ".tmp");
+        try (FileOutputStream stream = new FileOutputStream(temp, false)) {
+            stream.write(all.toString().getBytes(StandardCharsets.UTF_8));
+            stream.flush();
+            stream.getFD().sync();
+        }
+        if (!temp.renameTo(file)) {
+            if (file.exists() && !file.delete()) throw new IllegalStateException("ack_replace_failed");
+            if (!temp.renameTo(file)) throw new IllegalStateException("ack_replace_failed");
+        }
+    }
+
+    private String readText(File file, int max) throws Exception {
+        if (file.length() > max) throw new IllegalArgumentException("ack_store_oversized");
+        byte[] bytes = new byte[(int) file.length()];
+        try (FileInputStream in = new FileInputStream(file)) {
+            int offset = 0, count;
+            while (offset < bytes.length && (count = in.read(bytes, offset, bytes.length - offset)) > 0)
+                offset += count;
+            if (offset != bytes.length) throw new IllegalStateException("short_read");
+        }
+        return new String(bytes, StandardCharsets.UTF_8);
+    }
+
+    private void requireExactKeys(JSONObject object, Set<String> allowed) throws Exception {
+        Iterator<String> keys = object.keys();
+        while (keys.hasNext()) if (!allowed.contains(keys.next()))
+            throw new IllegalArgumentException("unknown_request_field");
+    }
+
+    @Override public Cursor query(Uri uri, String[] projection, String selection, String[] args, String sort) { return null; }
+    @Override public String getType(Uri uri) { return null; }
+    @Override public Uri insert(Uri uri, ContentValues values) { return null; }
+    @Override public int delete(Uri uri, String selection, String[] args) { return 0; }
+    @Override public int update(Uri uri, ContentValues values, String selection, String[] args) { return 0; }
+}
+NEW FRAGMENT END
+
+-----------------------------------------------------------------------
+TARGET: monitor-app/app/src/main/java/org/blackmirror/yj64monitor/DiagnosticReportProvider.java
+ORIGINAL FRAGMENT BEGIN
+[REPLACE EXISTING FILE — exact current content SHA must be rechecked]
+ORIGINAL FRAGMENT END
+NEW FRAGMENT BEGIN
+package org.blackmirror.yj64monitor;
+
+import android.content.ContentProvider;
+import android.content.ContentValues;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.Signature;
+import android.content.pm.SigningInfo;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.Binder;
+import android.os.Build;
+import android.os.Bundle;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Set;
+
+public final class DiagnosticReportProvider extends ContentProvider {
+    private static final String BASE_PACKAGE = "org.blackmirror.blackmirror";
+    private static final String PERMISSION =
+        "org.blackmirror.yj64monitor.permission.RECEIVE_REPORT";
+    private static final String SCHEMA = "yj64.diagnostic.v1";
+    private static final int MAX_BYTES = 64 * 1024;
+    private static final Set<String> TOP_KEYS = new HashSet<>(Arrays.asList(
+        "schema", "agent", "event", "timestamp_ms", "report_id", "data"
+    ));
+    private static final Set<String> FORBIDDEN = new HashSet<>(Arrays.asList(
+        "api_key", "token", "access_token", "refresh_token", "authorization",
+        "private_messages", "message_content", "chat_history", "prompt"
+    ));
+
+    @Override public boolean onCreate() { return true; }
+
+    @Override public synchronized Bundle call(String method, String arg, Bundle extras) {
+        Bundle result = new Bundle();
+        String reportId = "";
+        try {
+            if (!"receive_report".equals(method)) throw new IllegalArgumentException("unsupported_method");
+            verifyCaller();
+            if (extras == null) throw new IllegalArgumentException("extras_missing");
+            String raw = extras.getString("report_json");
+            if (raw == null || raw.getBytes(StandardCharsets.UTF_8).length > MAX_BYTES)
+                throw new IllegalArgumentException("report_missing_or_oversized");
+            JSONObject report = new JSONObject(raw);
+            requireExactKeys(report, TOP_KEYS);
+            if (!SCHEMA.equals(report.optString("schema")))
+                throw new IllegalArgumentException("unsupported_schema");
+            reportId = report.optString("report_id");
+            if (!reportId.matches("[a-f0-9]{32}"))
+                throw new IllegalArgumentException("invalid_report_id");
+            if (report.optString("event").trim().isEmpty())
+                throw new IllegalArgumentException("event_required");
+            JSONObject data = report.optJSONObject("data");
+            if (data == null) throw new IllegalArgumentException("data_must_be_object");
+            validateValue(report, 0);
+            File directory = new File(getContext().getFilesDir(), "yj64-reports");
+            if (!directory.exists() && !directory.mkdirs())
+                throw new IllegalStateException("report_directory_unavailable");
+            File file = new File(directory, "yj64-report.jsonl");
+            if (alreadyStored(file, reportId)) {
+                result.putBoolean("ok", true);
+                result.putString("report_id", reportId);
+                result.putBoolean("duplicate", true);
+                return result;
+            }
+            try (FileOutputStream out = new FileOutputStream(file, true)) {
+                out.write((report.toString() + "\n").getBytes(StandardCharsets.UTF_8));
+                out.flush();
+                out.getFD().sync();
+            }
+            result.putBoolean("ok", true);
+            result.putString("report_id", reportId);
+            result.putBoolean("duplicate", false);
+        } catch (Exception error) {
+            result.putBoolean("ok", false);
+            result.putString("report_id", reportId);
+            result.putString("error_type", error.getClass().getSimpleName());
+            result.putString("error", String.valueOf(error.getMessage()));
+        }
+        return result;
+    }
+
+    private void verifyCaller() throws Exception {
+        if (getContext().checkCallingPermission(PERMISSION) != PackageManager.PERMISSION_GRANTED)
+            throw new SecurityException("signature_permission_denied");
+        int uid = Binder.getCallingUid();
+        String[] packages = getContext().getPackageManager().getPackagesForUid(uid);
+        if (packages == null || packages.length != 1 || !BASE_PACKAGE.equals(packages[0]))
+            throw new SecurityException("caller_uid_package_mismatch");
+        if (!signerDigest(getContext().getPackageName()).equals(signerDigest(BASE_PACKAGE)))
+            throw new SecurityException("caller_signing_certificate_mismatch");
+    }
+
+    private String signerDigest(String packageName) throws Exception {
+        PackageManager pm = getContext().getPackageManager();
+        PackageInfo info = Build.VERSION.SDK_INT >= 28
+            ? pm.getPackageInfo(packageName, PackageManager.GET_SIGNING_CERTIFICATES)
+            : pm.getPackageInfo(packageName, PackageManager.GET_SIGNATURES);
+        Signature[] signatures;
+        if (Build.VERSION.SDK_INT >= 28) {
+            SigningInfo signing = info.signingInfo;
+            if (signing == null) throw new SecurityException("signing_info_missing");
+            signatures = signing.getApkContentsSigners();
+        } else signatures = info.signatures;
+        if (signatures == null || signatures.length != 1)
+            throw new SecurityException("unexpected_signer_count");
+        byte[] digest = MessageDigest.getInstance("SHA-256").digest(signatures[0].toByteArray());
+        StringBuilder hex = new StringBuilder();
+        for (byte b : digest) hex.append(String.format("%02x", b & 0xff));
+        return hex.toString();
+    }
+
+    private boolean alreadyStored(File file, String id) throws Exception {
+        if (!file.isFile()) return false;
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                new FileInputStream(file), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                try { if (id.equals(new JSONObject(line).optString("report_id"))) return true; }
+                catch (Exception ignored) { }
+            }
+        }
+        return false;
+    }
+
+    private void validateValue(Object value, int depth) throws Exception {
+        if (depth > 8) throw new IllegalArgumentException("payload_depth_exceeded");
+        if (value instanceof JSONObject) {
+            JSONObject object = (JSONObject) value;
+            Iterator<String> keys = object.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                if (FORBIDDEN.contains(key.toLowerCase()))
+                    throw new SecurityException("sensitive_payload_field_rejected");
+                validateValue(object.get(key), depth + 1);
+            }
+        } else if (value instanceof JSONArray) {
+            JSONArray array = (JSONArray) value;
+            if (array.length() > 256) throw new IllegalArgumentException("payload_list_limit");
+            for (int i = 0; i < array.length(); i++) validateValue(array.get(i), depth + 1);
+        } else if (value instanceof String) {
+            if (((String) value).length() > 4096)
+                throw new IllegalArgumentException("payload_string_limit");
+        } else if (!(value == JSONObject.NULL || value instanceof Number || value instanceof Boolean)) {
+            throw new IllegalArgumentException("unsupported_payload_value");
+        }
+    }
+
+    private void requireExactKeys(JSONObject object, Set<String> allowed) throws Exception {
+        Iterator<String> keys = object.keys();
+        while (keys.hasNext()) if (!allowed.contains(keys.next()))
+            throw new IllegalArgumentException("unknown_report_field");
+    }
+
+    @Override public Cursor query(Uri uri, String[] projection, String selection, String[] args, String sort) { return null; }
+    @Override public String getType(Uri uri) { return null; }
+    @Override public Uri insert(Uri uri, ContentValues values) { return null; }
+    @Override public int delete(Uri uri, String selection, String[] args) { return 0; }
+    @Override public int update(Uri uri, ContentValues values, String selection, String[] args) { return 0; }
+}
+NEW FRAGMENT END
+
+-----------------------------------------------------------------------
+MANIFEST / BUILD WIRING — REQUIRED EXACT PATCHES
+-----------------------------------------------------------------------
+
+Base app buildozer.spec:
+- add android.permission
+  org.blackmirror.blackmirror.permission.MONITOR_COMMAND
+- retain org.blackmirror.yj64monitor.permission.RECEIVE_REPORT
+- register DiagnosticMonitorProvider with authority
+  org.blackmirror.blackmirror.diagnostics, exported=true, permission
+  org.blackmirror.blackmirror.permission.MONITOR_COMMAND
+- retain existing queries entries and MonitorActivity process wiring.
+
+Base manifest must declare:
+<permission android:name="org.blackmirror.blackmirror.permission.MONITOR_COMMAND"
+            android:protectionLevel="signature" />
+and provider declaration under application:
+<provider android:name="org.blackmirror.blackmirror.DiagnosticMonitorProvider"
+          android:authorities="org.blackmirror.blackmirror.diagnostics"
+          android:exported="true"
+          android:permission="org.blackmirror.blackmirror.permission.MONITOR_COMMAND" />
+
+Monitor app manifest:
+- change RECEIVE_REPORT protectionLevel from normal to signature;
+- add uses-permission for Base MONITOR_COMMAND;
+- retain provider authority and exported=true with RECEIVE_REPORT permission.
+
+No manifest edit is complete until the generated Base APK manifest is inspected
+and confirms exactly one provider declaration and exactly one signature
+permission declaration. Confirm both APK signing certificates are identical
+before installation/testing. If not identical, stop: do not weaken permission.
+
+-----------------------------------------------------------------------
+BASE PROVIDER COMMAND CONTRACT
+-----------------------------------------------------------------------
+Only get_status, request_report_flush and request_diagnostic_snapshot are
+accepted. All command args must be empty. The provider returns only status
+availability, report line count and byte count; never message bodies, prompts,
+private histories, credentials or arbitrary paths. request_id is an idempotency
+key persisted atomically. Provider writes/flushes are fsynced before ACK.
+
+-----------------------------------------------------------------------
+MONITOR PROVIDER REPORT CONTRACT
+-----------------------------------------------------------------------
+Only schema yj64.diagnostic.v1 and exact envelope fields are accepted.
+Caller UID must map to exactly the Base package and signer digest must match.
+Payload maximum 64 KiB; nested depth maximum 8; arrays maximum 256; strings
+maximum 4096. Sensitive fields are rejected. report_id is unique and retries
+are idempotent by scanning the durable JSONL before append. ACK is returned
+only after fsync.
+
+END OF NATIVE ANDROID IPC PROVIDER SOURCE
+
+
+========================================================================
+Q003-G ANDROID MANIFEST / PROVIDER REGISTRATION — EXACT GUARDED PATCHES
+========================================================================
+
+PATCH-ID: Q003-G-BASE-PROVIDER-SOURCE-001
+TARGET FILE: android_src/org/blackmirror/blackmirror/DiagnosticMonitorProvider.java
+PURPOSE: Add the Base-side authenticated Monitor command provider.
+ORIGINAL FRAGMENT BEGIN
+[NEW FILE]
+ORIGINAL FRAGMENT END
+NEW FRAGMENT BEGIN
+package org.blackmirror.blackmirror;
+
+import android.content.ContentProvider;
+import android.content.ContentValues;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.Signature;
+import android.content.pm.SigningInfo;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.Binder;
+import android.os.Build;
+import android.os.Bundle;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Set;
+
+public final class DiagnosticMonitorProvider extends ContentProvider {
+    private static final String MONITOR_PACKAGE = "org.blackmirror.yj64monitor";
+    private static final String PERMISSION =
+        "org.blackmirror.blackmirror.permission.MONITOR_COMMAND";
+    private static final String AUTHORITY = "org.blackmirror.blackmirror.diagnostics";
+    private static final String PROTOCOL = "yj64.monitor-command.v1";
+    private static final int MAX_BYTES = 16 * 1024;
+    private static final Set<String> COMMANDS = new HashSet<>(Arrays.asList(
+        "get_status", "request_report_flush", "request_diagnostic_snapshot"
+    ));
+    private static final Set<String> TOP_KEYS = new HashSet<>(Arrays.asList(
+        "protocol", "request_id", "command", "created_ms", "args"
+    ));
+
+    @Override public boolean onCreate() { return true; }
+
+    @Override public synchronized Bundle call(String method, String arg, Bundle extras) {
+        Bundle out = new Bundle();
+        String requestId = "";
+        try {
+            if (!"execute_command".equals(method)) throw new IllegalArgumentException("unsupported_method");
+            verifyCaller();
+            if (extras == null) throw new IllegalArgumentException("extras_missing");
+            String raw = extras.getString("request_json");
+            if (raw == null || raw.getBytes(StandardCharsets.UTF_8).length > MAX_BYTES)
+                throw new IllegalArgumentException("request_missing_or_oversized");
+            JSONObject request = new JSONObject(raw);
+            requireExactKeys(request, TOP_KEYS);
+            if (!PROTOCOL.equals(request.optString("protocol")))
+                throw new IllegalArgumentException("unsupported_protocol");
+            requestId = request.optString("request_id");
+            if (!requestId.matches("[a-f0-9]{32}"))
+                throw new IllegalArgumentException("invalid_request_id");
+            String command = request.optString("command");
+            if (!COMMANDS.contains(command)) throw new SecurityException("command_not_allowlisted");
+            JSONObject args = request.optJSONObject("args");
+            if (args == null || args.length() != 0)
+                throw new IllegalArgumentException("command_arguments_not_supported");
+            JSONObject result = readAck(requestId);
+            if (result == null) {
+                result = execute(command);
+                writeAck(requestId, result);
+            }
+            out.putBoolean("ok", true);
+            out.putString("request_id", requestId);
+            out.putString("result_json", result.toString());
+        } catch (Exception e) {
+            out.putBoolean("ok", false);
+            out.putString("request_id", requestId);
+            out.putString("error", e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage()));
+        }
+        return out;
+    }
+
+    private void verifyCaller() throws Exception {
+        if (getContext().checkCallingPermission(PERMISSION) != PackageManager.PERMISSION_GRANTED)
+            throw new SecurityException("signature_permission_denied");
+        int uid = Binder.getCallingUid();
+        String[] packages = getContext().getPackageManager().getPackagesForUid(uid);
+        if (packages == null || packages.length != 1 || !MONITOR_PACKAGE.equals(packages[0]))
+            throw new SecurityException("caller_uid_package_mismatch");
+        String base = signerDigest(getContext().getPackageName());
+        String monitor = signerDigest(MONITOR_PACKAGE);
+        if (!base.equals(monitor)) throw new SecurityException("caller_signing_certificate_mismatch");
+    }
+
+    private String signerDigest(String packageName) throws Exception {
+        PackageManager pm = getContext().getPackageManager();
+        PackageInfo info;
+        if (Build.VERSION.SDK_INT >= 28) {
+            info = pm.getPackageInfo(packageName, PackageManager.GET_SIGNING_CERTIFICATES);
+        } else {
+            info = pm.getPackageInfo(packageName, PackageManager.GET_SIGNATURES);
+        }
+        Signature[] signatures;
+        if (Build.VERSION.SDK_INT >= 28) {
+            SigningInfo signing = info.signingInfo;
+            if (signing == null) throw new SecurityException("signing_info_missing");
+            signatures = signing.getApkContentsSigners();
+        } else {
+            signatures = info.signatures;
+        }
+        if (signatures == null || signatures.length != 1)
+            throw new SecurityException("unexpected_signer_count");
+        byte[] digest = MessageDigest.getInstance("SHA-256").digest(signatures[0].toByteArray());
+        StringBuilder hex = new StringBuilder();
+        for (byte b : digest) hex.append(String.format("%02x", b & 0xff));
+        return hex.toString();
+    }
+
+    private JSONObject execute(String command) throws Exception {
+        File root = getContext().getFilesDir();
+        File reports = new File(root, "yj64-reports/yj64-report.jsonl");
+        JSONObject result = new JSONObject();
+        if ("get_status".equals(command)) {
+            result.put("status_available", new File(root, "diagnostic-agent-status.json").isFile());
+            result.put("base_package", getContext().getPackageName());
+        } else if ("request_report_flush".equals(command)) {
+            if (reports.isFile()) {
+                try (FileOutputStream stream = new FileOutputStream(reports, true)) {
+                    stream.flush();
+                    stream.getFD().sync();
+                }
+            }
+            result.put("flushed", true);
+            result.put("report_bytes", reports.isFile() ? reports.length() : 0);
+        } else if ("request_diagnostic_snapshot".equals(command)) {
+            long lines = 0;
+            if (reports.isFile()) {
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                        new FileInputStream(reports), StandardCharsets.UTF_8))) {
+                    while (reader.readLine() != null) lines++;
+                }
+            }
+            result.put("report_lines", lines);
+            result.put("report_bytes", reports.isFile() ? reports.length() : 0);
+            result.put("status_available", new File(root, "diagnostic-agent-status.json").isFile());
+        } else {
+            throw new SecurityException("unsupported_command");
+        }
+        return result;
+    }
+
+    private File ackFile() { return new File(getContext().getFilesDir(), "yj64-monitor-command-acks.json"); }
+
+    private JSONObject readAck(String id) throws Exception {
+        File file = ackFile();
+        if (!file.isFile()) return null;
+        JSONObject all = new JSONObject(readText(file, 256 * 1024));
+        JSONObject acks = all.optJSONObject("acks");
+        return acks == null ? null : acks.optJSONObject(id);
+    }
+
+    private void writeAck(String id, JSONObject result) throws Exception {
+        File file = ackFile();
+        JSONObject all = new JSONObject();
+        if (file.isFile()) {
+            try { all = new JSONObject(readText(file, 256 * 1024)); }
+            catch (Exception ignored) { all = new JSONObject(); }
+        }
+        JSONObject acks = all.optJSONObject("acks");
+        if (acks == null) acks = new JSONObject();
+        acks.put(id, result);
+        JSONArray ids = acks.names();
+        if (ids != null && ids.length() > 500) {
+            for (int i = 0; i < ids.length() - 500; i++) acks.remove(ids.getString(i));
+        }
+        all.put("schema", "yj64.monitor-command-acks.v1");
+        all.put("acks", acks);
+        File temp = new File(file.getParentFile(), file.getName() + ".tmp");
+        try (FileOutputStream stream = new FileOutputStream(temp, false)) {
+            stream.write(all.toString().getBytes(StandardCharsets.UTF_8));
+            stream.flush();
+            stream.getFD().sync();
+        }
+        if (!temp.renameTo(file)) {
+            if (file.exists() && !file.delete()) throw new IllegalStateException("ack_replace_failed");
+            if (!temp.renameTo(file)) throw new IllegalStateException("ack_replace_failed");
+        }
+    }
+
+    private String readText(File file, int max) throws Exception {
+        if (file.length() > max) throw new IllegalArgumentException("ack_store_oversized");
+        byte[] bytes = new byte[(int) file.length()];
+        try (FileInputStream in = new FileInputStream(file)) {
+            int offset = 0, count;
+            while (offset < bytes.length && (count = in.read(bytes, offset, bytes.length - offset)) > 0)
+                offset += count;
+            if (offset != bytes.length) throw new IllegalStateException("short_read");
+        }
+        return new String(bytes, StandardCharsets.UTF_8);
+    }
+
+    private void requireExactKeys(JSONObject object, Set<String> allowed) throws Exception {
+        Iterator<String> keys = object.keys();
+        while (keys.hasNext()) if (!allowed.contains(keys.next()))
+            throw new IllegalArgumentException("unknown_request_field");
+    }
+
+    @Override public Cursor query(Uri uri, String[] projection, String selection, String[] args, String sort) { return null; }
+    @Override public String getType(Uri uri) { return null; }
+    @Override public Uri insert(Uri uri, ContentValues values) { return null; }
+    @Override public int delete(Uri uri, String selection, String[] args) { return 0; }
+    @Override public int update(Uri uri, ContentValues values, String selection, String[] args) { return 0; }
+}
+NEW FRAGMENT END
+
+---
+
+PATCH-ID: Q003-G-MONITOR-PROVIDER-SOURCE-002
+TARGET FILE: monitor-app/app/src/main/java/org/blackmirror/yj64monitor/DiagnosticReportProvider.java
+PURPOSE: Replace package-only caller validation with signature validation, strict schema, sensitive-field rejection, durable idempotent append.
+ORIGINAL FRAGMENT BEGIN
+package org.blackmirror.yj64monitor;
+
+import android.content.ContentProvider;
+import android.content.ContentValues;
+import android.os.Binder;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.Bundle;
+
+import org.json.JSONObject;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.nio.charset.StandardCharsets;
+
+public class DiagnosticReportProvider extends ContentProvider {
+    @Override public boolean onCreate() {
+        return true;
+    }
+
+    @Override public Bundle call(String method, String arg, Bundle extras) {
+        Bundle result = new Bundle();
+        if (!"receive_report".equals(method)) {
+            result.putBoolean("ok", false);
+            result.putString("error", "unsupported_method");
+            return result;
+        }
+
+        String reportId = "";
+        try {
+            int callingUid = Binder.getCallingUid();
+            String[] callerPackages = getContext().getPackageManager()
+                .getPackagesForUid(callingUid);
+            boolean allowedCaller = false;
+            if (callerPackages != null) {
+                for (String callerPackage : callerPackages) {
+                    if ("org.blackmirror.blackmirror".equals(callerPackage)) {
+                        allowedCaller = true;
+                        break;
+                    }
+                }
+            }
+            if (!allowedCaller) {
+                throw new SecurityException("caller_package_not_allowed");
+            }
+            if (extras == null) throw new IllegalArgumentException("extras_missing");
+            String raw = extras.getString("report_json");
+            if (raw == null || raw.length() > 131072) {
+                throw new IllegalArgumentException("report_missing_or_oversized");
+            }
+            JSONObject report = new JSONObject(raw);
+            reportId = report.optString("report_id",
+                report.optString("message_id", ""));
+            if (reportId.isEmpty()) throw new IllegalArgumentException("report_id_missing");
+            report.put("_external_monitor_received_at_ms", System.currentTimeMillis());
+            report.put("_external_monitor_source_package", "org.blackmirror.blackmirror");
+
+            File directory = new File(getContext().getFilesDir(), "yj64-reports");
+            if (!directory.exists() && !directory.mkdirs()) {
+                throw new IllegalStateException("report_directory_unavailable");
+            }
+            File file = new File(directory, "yj64-report.jsonl");
+            try (FileOutputStream out = new FileOutputStream(file, true)) {
+                out.write((report.toString() + "\n").getBytes(StandardCharsets.UTF_8));
+                out.flush();
+                out.getFD().sync();
+            }
+            result.putBoolean("ok", true);
+            result.putString("report_id", reportId);
+        } catch (Exception error) {
+            result.putBoolean("ok", false);
+            result.putString("report_id", reportId);
+            result.putString("error_type", error.getClass().getName());
+            result.putString("error", String.valueOf(error.getMessage()));
+        }
+        return result;
+    }
+
+    @Override public Cursor query(Uri uri, String[] projection, String selection,
+                                  String[] selectionArgs, String sortOrder) {
+        return null;
+    }
+
+    @Override public String getType(Uri uri) {
+        return null;
+    }
+
+    @Override public Uri insert(Uri uri, ContentValues values) {
+        return null;
+    }
+
+    @Override public int delete(Uri uri, String selection, String[] selectionArgs) {
+        return 0;
+    }
+
+    @Override public int update(Uri uri, ContentValues values, String selection,
+                                String[] selectionArgs) {
+        return 0;
+    }
+}
+
+ORIGINAL FRAGMENT END
+NEW FRAGMENT BEGIN
+package org.blackmirror.yj64monitor;
+
+import android.content.ContentProvider;
+import android.content.ContentValues;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.Signature;
+import android.content.pm.SigningInfo;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.Binder;
+import android.os.Build;
+import android.os.Bundle;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Set;
+
+public final class DiagnosticReportProvider extends ContentProvider {
+    private static final String BASE_PACKAGE = "org.blackmirror.blackmirror";
+    private static final String PERMISSION =
+        "org.blackmirror.yj64monitor.permission.RECEIVE_REPORT";
+    private static final String SCHEMA = "yj64.diagnostic.v1";
+    private static final int MAX_BYTES = 64 * 1024;
+    private static final Set<String> TOP_KEYS = new HashSet<>(Arrays.asList(
+        "schema", "agent", "event", "timestamp_ms", "report_id", "data"
+    ));
+    private static final Set<String> FORBIDDEN = new HashSet<>(Arrays.asList(
+        "api_key", "token", "access_token", "refresh_token", "authorization",
+        "private_messages", "message_content", "chat_history", "prompt"
+    ));
+
+    @Override public boolean onCreate() { return true; }
+
+    @Override public synchronized Bundle call(String method, String arg, Bundle extras) {
+        Bundle result = new Bundle();
+        String reportId = "";
+        try {
+            if (!"receive_report".equals(method)) throw new IllegalArgumentException("unsupported_method");
+            verifyCaller();
+            if (extras == null) throw new IllegalArgumentException("extras_missing");
+            String raw = extras.getString("report_json");
+            if (raw == null || raw.getBytes(StandardCharsets.UTF_8).length > MAX_BYTES)
+                throw new IllegalArgumentException("report_missing_or_oversized");
+            JSONObject report = new JSONObject(raw);
+            requireExactKeys(report, TOP_KEYS);
+            if (!SCHEMA.equals(report.optString("schema")))
+                throw new IllegalArgumentException("unsupported_schema");
+            reportId = report.optString("report_id");
+            if (!reportId.matches("[a-f0-9]{32}"))
+                throw new IllegalArgumentException("invalid_report_id");
+            if (report.optString("event").trim().isEmpty())
+                throw new IllegalArgumentException("event_required");
+            JSONObject data = report.optJSONObject("data");
+            if (data == null) throw new IllegalArgumentException("data_must_be_object");
+            validateValue(report, 0);
+            File directory = new File(getContext().getFilesDir(), "yj64-reports");
+            if (!directory.exists() && !directory.mkdirs())
+                throw new IllegalStateException("report_directory_unavailable");
+            File file = new File(directory, "yj64-report.jsonl");
+            if (alreadyStored(file, reportId)) {
+                result.putBoolean("ok", true);
+                result.putString("report_id", reportId);
+                result.putBoolean("duplicate", true);
+                return result;
+            }
+            try (FileOutputStream out = new FileOutputStream(file, true)) {
+                out.write((report.toString() + "\n").getBytes(StandardCharsets.UTF_8));
+                out.flush();
+                out.getFD().sync();
+            }
+            result.putBoolean("ok", true);
+            result.putString("report_id", reportId);
+            result.putBoolean("duplicate", false);
+        } catch (Exception error) {
+            result.putBoolean("ok", false);
+            result.putString("report_id", reportId);
+            result.putString("error_type", error.getClass().getSimpleName());
+            result.putString("error", String.valueOf(error.getMessage()));
+        }
+        return result;
+    }
+
+    private void verifyCaller() throws Exception {
+        if (getContext().checkCallingPermission(PERMISSION) != PackageManager.PERMISSION_GRANTED)
+            throw new SecurityException("signature_permission_denied");
+        int uid = Binder.getCallingUid();
+        String[] packages = getContext().getPackageManager().getPackagesForUid(uid);
+        if (packages == null || packages.length != 1 || !BASE_PACKAGE.equals(packages[0]))
+            throw new SecurityException("caller_uid_package_mismatch");
+        if (!signerDigest(getContext().getPackageName()).equals(signerDigest(BASE_PACKAGE)))
+            throw new SecurityException("caller_signing_certificate_mismatch");
+    }
+
+    private String signerDigest(String packageName) throws Exception {
+        PackageManager pm = getContext().getPackageManager();
+        PackageInfo info = Build.VERSION.SDK_INT >= 28
+            ? pm.getPackageInfo(packageName, PackageManager.GET_SIGNING_CERTIFICATES)
+            : pm.getPackageInfo(packageName, PackageManager.GET_SIGNATURES);
+        Signature[] signatures;
+        if (Build.VERSION.SDK_INT >= 28) {
+            SigningInfo signing = info.signingInfo;
+            if (signing == null) throw new SecurityException("signing_info_missing");
+            signatures = signing.getApkContentsSigners();
+        } else signatures = info.signatures;
+        if (signatures == null || signatures.length != 1)
+            throw new SecurityException("unexpected_signer_count");
+        byte[] digest = MessageDigest.getInstance("SHA-256").digest(signatures[0].toByteArray());
+        StringBuilder hex = new StringBuilder();
+        for (byte b : digest) hex.append(String.format("%02x", b & 0xff));
+        return hex.toString();
+    }
+
+    private boolean alreadyStored(File file, String id) throws Exception {
+        if (!file.isFile()) return false;
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                new FileInputStream(file), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                try { if (id.equals(new JSONObject(line).optString("report_id"))) return true; }
+                catch (Exception ignored) { }
+            }
+        }
+        return false;
+    }
+
+    private void validateValue(Object value, int depth) throws Exception {
+        if (depth > 8) throw new IllegalArgumentException("payload_depth_exceeded");
+        if (value instanceof JSONObject) {
+            JSONObject object = (JSONObject) value;
+            Iterator<String> keys = object.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                if (FORBIDDEN.contains(key.toLowerCase()))
+                    throw new SecurityException("sensitive_payload_field_rejected");
+                validateValue(object.get(key), depth + 1);
+            }
+        } else if (value instanceof JSONArray) {
+            JSONArray array = (JSONArray) value;
+            if (array.length() > 256) throw new IllegalArgumentException("payload_list_limit");
+            for (int i = 0; i < array.length(); i++) validateValue(array.get(i), depth + 1);
+        } else if (value instanceof String) {
+            if (((String) value).length() > 4096)
+                throw new IllegalArgumentException("payload_string_limit");
+        } else if (!(value == JSONObject.NULL || value instanceof Number || value instanceof Boolean)) {
+            throw new IllegalArgumentException("unsupported_payload_value");
+        }
+    }
+
+    private void requireExactKeys(JSONObject object, Set<String> allowed) throws Exception {
+        Iterator<String> keys = object.keys();
+        while (keys.hasNext()) if (!allowed.contains(keys.next()))
+            throw new IllegalArgumentException("unknown_report_field");
+    }
+
+    @Override public Cursor query(Uri uri, String[] projection, String selection, String[] args, String sort) { return null; }
+    @Override public String getType(Uri uri) { return null; }
+    @Override public Uri insert(Uri uri, ContentValues values) { return null; }
+    @Override public int delete(Uri uri, String selection, String[] args) { return 0; }
+    @Override public int update(Uri uri, ContentValues values, String selection, String[] args) { return 0; }
+}
+NEW FRAGMENT END
+
+---
+
+PATCH-ID: Q003-G-MONITOR-MANIFEST-003
+TARGET FILE: monitor-app/app/src/main/AndroidManifest.xml
+PURPOSE: Use signature permissions in both IPC directions.
+ORIGINAL FRAGMENT BEGIN
+    <uses-permission android:name="android.permission.INTERNET" />
+    <permission android:name="org.blackmirror.yj64monitor.permission.RECEIVE_REPORT" android:protectionLevel="normal" />
+ORIGINAL FRAGMENT END
+NEW FRAGMENT BEGIN
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="org.blackmirror.blackmirror.permission.MONITOR_COMMAND" />
+    <permission android:name="org.blackmirror.yj64monitor.permission.RECEIVE_REPORT" android:protectionLevel="signature" />
+NEW FRAGMENT END
+
+---
+
+PATCH-ID: Q003-G-BASE-MANIFEST-004
+TARGET FILE: buildozer.spec
+PURPOSE: Declare the Base-side signature permission while retaining existing package/provider queries.
+ORIGINAL FRAGMENT BEGIN
+android.p4a_extra_args = --cflags="-Wno-error=implicit-function-declaration" --extra-manifest-xml="<queries><package android:name=\"org.blackmirror.yj64monitor\" /><provider android:authorities=\"org.blackmirror.yj64monitor.diagnostics\" /></queries>"
+ORIGINAL FRAGMENT END
+NEW FRAGMENT BEGIN
+android.p4a_extra_args = --cflags="-Wno-error=implicit-function-declaration" --extra-manifest-xml="<permission android:name=\"org.blackmirror.blackmirror.permission.MONITOR_COMMAND\" android:protectionLevel=\"signature\" /><queries><package android:name=\"org.blackmirror.yj64monitor\" /><provider android:authorities=\"org.blackmirror.yj64monitor.diagnostics\" /></queries>"
+NEW FRAGMENT END
+
+---
+
+PATCH-ID: Q003-G-BASE-PROVIDER-REGISTRATION-005
+TARGET FILE: p4a/hook.py
+PURPOSE: Register Base provider exactly once in generated application manifest and preserve MonitorActivity's separate process.
+ORIGINAL FRAGMENT BEGIN
+from pathlib import Path
+
+from pythonforandroid.toolchain import ToolchainCL
+
+
+ACTIVITY = 'org.blackmirror.blackmirror.MonitorActivity'
+PROCESS = ':monitor_ui'
+
+
+def after_apk_build(toolchain: ToolchainCL) -> None:
+    manifest_file = (
+        Path(toolchain._dist.dist_dir)
+        / 'src'
+        / 'main'
+        / 'AndroidManifest.xml'
+    )
+    text = manifest_file.read_text(encoding='utf-8')
+
+    marker = f'android:name="{ACTIVITY}"'
+    position = text.find(marker)
+    if position < 0:
+        raise RuntimeError(
+            f'Cannot find {ACTIVITY} in generated AndroidManifest.xml'
+        )
+
+    tag_end = text.find('>', position)
+    if tag_end < 0:
+        raise RuntimeError(
+            'Cannot find the end of MonitorActivity manifest tag'
+        )
+
+    tag_start = text.rfind('<activity', 0, position)
+    if tag_start < 0:
+        raise RuntimeError('Cannot find MonitorActivity opening tag')
+
+    tag = text[tag_start:tag_end + 1]
+    if 'android:process=' in tag:
+        return
+
+    replacement = (
+        tag[:-1]
+        + f' android:process="{PROCESS}">'
+    )
+    text = text[:tag_start] + replacement + text[tag_end + 1:]
+    manifest_file.write_text(text, encoding='utf-8')
+    print(
+        f'YJ-64: {ACTIVITY} assigned to android:process="{PROCESS}"'
+    )
+
+ORIGINAL FRAGMENT END
+NEW FRAGMENT BEGIN
+from pathlib import Path
+
+from pythonforandroid.toolchain import ToolchainCL
+
+
+ACTIVITY = 'org.blackmirror.blackmirror.MonitorActivity'
+PROCESS = ':monitor_ui'
+PROVIDER = 'org.blackmirror.blackmirror.DiagnosticMonitorProvider'
+AUTHORITY = 'org.blackmirror.blackmirror.diagnostics'
+PERMISSION = 'org.blackmirror.blackmirror.permission.MONITOR_COMMAND'
+
+
+def after_apk_build(toolchain: ToolchainCL) -> None:
+    manifest_file = (
+        Path(toolchain._dist.dist_dir)
+        / 'src'
+        / 'main'
+        / 'AndroidManifest.xml'
+    )
+    text = manifest_file.read_text(encoding='utf-8')
+
+    marker = f'android:name="{ACTIVITY}"'
+    position = text.find(marker)
+    if position < 0:
+        raise RuntimeError(
+            f'Cannot find {ACTIVITY} in generated AndroidManifest.xml'
+        )
+    tag_end = text.find('>', position)
+    tag_start = text.rfind('<activity', 0, position)
+    if tag_end < 0 or tag_start < 0:
+        raise RuntimeError('Cannot locate MonitorActivity manifest tag')
+    tag = text[tag_start:tag_end + 1]
+    if 'android:process="' not in tag:
+        replacement = tag[:-1] + f' android:process="{PROCESS}">'
+        text = text[:tag_start] + replacement + text[tag_end + 1:]
+    elif f'android:process="{PROCESS}"' not in tag:
+        raise RuntimeError('MonitorActivity has an unexpected process assignment')
+
+    if text.count(f'android:name="{PROVIDER}"') > 1:
+        raise RuntimeError('Duplicate DiagnosticMonitorProvider declaration')
+    if f'android:name="{PROVIDER}"' not in text:
+        provider_xml = (
+            f'    <provider android:name="{PROVIDER}" '
+            f'android:authorities="{AUTHORITY}" android:exported="true" '
+            f'android:permission="{PERMISSION}" />\n'
+        )
+        close = text.rfind('</application>')
+        if close < 0:
+            raise RuntimeError('Cannot locate closing application tag')
+        text = text[:close] + provider_xml + text[close:]
+
+    if text.count(f'android:name="{PERMISSION}"') < 1:
+        raise RuntimeError('Base signature permission declaration missing')
+    if text.count(f'android:authorities="{AUTHORITY}"') != 1:
+        raise RuntimeError('Base provider authority missing or duplicated')
+
+    manifest_file.write_text(text, encoding='utf-8')
+    print('YJ-64: MonitorActivity process and authenticated Monitor IPC provider verified')
+
+NEW FRAGMENT END
+
+
+
+========================================================================
+Q003-G MONITOR-TO-BASE CALLER UI — EXACT GUARDED PATCHES
+========================================================================
+
+PATCH-ID: Q003-G-MONITOR-ACTIVITY-IMPORT-001
+TARGET FILE: monitor-app/app/src/main/java/org/blackmirror/yj64monitor/MonitorActivity.java
+ORIGINAL FRAGMENT BEGIN
+import android.content.Intent;
+ORIGINAL FRAGMENT END
+NEW FRAGMENT BEGIN
+import android.content.Intent;
+import android.net.Uri;
+NEW FRAGMENT END
+
+---
+
+PATCH-ID: Q003-G-MONITOR-ACTIVITY-BUTTONS-002
+TARGET FILE: monitor-app/app/src/main/java/org/blackmirror/yj64monitor/MonitorActivity.java
+ORIGINAL FRAGMENT BEGIN
+        addButton(root, "LAUNCH YJ-64", v -> launchBase());
+        addButton(root, "REFRESH CRASH REPORT", v -> refreshDiagnostics());
+ORIGINAL FRAGMENT END
+NEW FRAGMENT BEGIN
+        addButton(root, "LAUNCH YJ-64", v -> launchBase());
+        addButton(root, "CHECK BASE STATUS", v -> callBaseCommand("get_status"));
+        addButton(root, "FLUSH BASE REPORT", v -> callBaseCommand("request_report_flush"));
+        addButton(root, "BASE DIAGNOSTIC SNAPSHOT", v -> callBaseCommand("request_diagnostic_snapshot"));
+        addButton(root, "REFRESH CRASH REPORT", v -> refreshDiagnostics());
+NEW FRAGMENT END
+
+---
+
+PATCH-ID: Q003-G-MONITOR-ACTIVITY-CALL-003
+TARGET FILE: monitor-app/app/src/main/java/org/blackmirror/yj64monitor/MonitorActivity.java
+ORIGINAL FRAGMENT BEGIN
+    private void launchBase() {
+ORIGINAL FRAGMENT END
+NEW FRAGMENT BEGIN
+    private void callBaseCommand(String command) {
+        if (!("get_status".equals(command)
+                || "request_report_flush".equals(command)
+                || "request_diagnostic_snapshot".equals(command))) {
+            status.setText("Rejected unknown Base IPC command.");
+            return;
+        }
+        String requestId = UUID.randomUUID().toString().replace("-", "");
+        try {
+            JSONObject request = new JSONObject();
+            request.put("protocol", "yj64.monitor-command.v1");
+            request.put("request_id", requestId);
+            request.put("command", command);
+            request.put("created_ms", System.currentTimeMillis());
+            request.put("args", new JSONObject());
+            Bundle extras = new Bundle();
+            extras.putString("request_json", request.toString());
+            Bundle response = getContentResolver().call(
+                Uri.parse("content://org.blackmirror.blackmirror.diagnostics"),
+                "execute_command", null, extras
+            );
+            if (response == null || !response.getBoolean("ok", false)
+                    || !requestId.equals(response.getString("request_id"))) {
+                String error = response == null ? "provider_returned_null"
+                    : String.valueOf(response.getString("error"));
+                throw new SecurityException(error);
+            }
+            JSONObject payload = new JSONObject(
+                String.valueOf(response.getString("result_json"))
+            );
+            appendEvent("base_ipc_command_succeeded",
+                new JSONObject().put("command", command)
+                    .put("request_id", requestId).toString());
+            status.setText("BASE IPC: " + command + "\n"
+                + payload.toString(2) + "\n\n" + reportSummary());
+        } catch (Exception error) {
+            appendEvent("base_ipc_command_failed",
+                new JSONObject().put("command", command)
+                    .put("request_id", requestId)
+                    .put("error_type", error.getClass().getSimpleName())
+                    .put("message", String.valueOf(error.getMessage())).toString());
+            status.setText("Base IPC failed: " + error.getClass().getSimpleName()
+                + "\n" + String.valueOf(error.getMessage()) + "\n\n" + reportSummary());
+        }
+    }
+
+    private void launchBase() {
+NEW FRAGMENT END
+
+---
+
+PATCH-ID: Q003-G-MONITOR-QUERY-004
+TARGET FILE: monitor-app/app/src/main/AndroidManifest.xml
+ORIGINAL FRAGMENT BEGIN
+    <queries>
+        <package android:name="org.blackmirror.blackmirror" />
+    </queries>
+ORIGINAL FRAGMENT END
+NEW FRAGMENT BEGIN
+    <queries>
+        <package android:name="org.blackmirror.blackmirror" />
+        <provider android:authorities="org.blackmirror.blackmirror.diagnostics" />
+    </queries>
+NEW FRAGMENT END
+
+
+
+
+PATCH-ID: Q003-F-CONTEXT-MANAGER-AUTH-002
+
+TARGET FILE: context_manager.py
+
+PURPOSE:
+Убрать обход private authorization через caller-supplied authorized=True.
+Проверять доступ непосредственно через PermissionManager. Не вводить
+provider tokenizer и не оценивать provider token budget: tokenizer остаётся
+отложенной задачей.
+
+ORIGINAL FRAGMENT BEGIN
+"""Provider-neutral, scope-aware context assembly for all router routes."""
+from __future__ import annotations
+
+import hashlib
+import json
+from typing import Any
+
+VALID_MODES = {"memory_only", "memory_recent", "full_history"}
+VALID_SCOPES = {"common", "private", "participant_system"}
+
+def _text(value: Any, limit: int = 20000) -> str:
+    return str(value or "")[:limit]
+
+def _message(row: dict[str, Any]) -> dict[str, str]:
+    role = str(row.get("role", "user"))
+    if role not in {"system", "user", "assistant"}:
+        role = "user"
+    return {"role": role, "content": _text(row.get("content"))}
+
+class ContextManager:
+    def build(self, *, route_id: str, mode: str,
+              owner_instructions: str = "",
+              participant_instructions: str = "",
+              participant_memory: str = "",
+              semantic_memory: str = "",
+              recent_history: list[dict[str, Any]] | None = None,
+              full_history: list[dict[str, Any]] | None = None,
+              private_history: list[dict[str, Any]] | None = None,
+              scope: str = "common",
+              authorized: bool = False) -> dict[str, Any]:
+        if mode not in VALID_MODES:
+            raise ValueError("unknown context mode")
+        if scope not in VALID_SCOPES:
+            raise ValueError("unknown context scope")
+        if scope == "private" and not authorized:
+            raise PermissionError("private context requires authorization")
+        if not route_id.startswith("route_"):
+            raise ValueError("invalid route identity")
+
+        instructions = []
+        if owner_instructions.strip():
+            instructions.append("OWNER INSTRUCTIONS:\n" + _text(owner_instructions))
+        if participant_instructions.strip():
+            instructions.append("PARTICIPANT SYSTEM INSTRUCTIONS:\n" +
+                                _text(participant_instructions))
+        if participant_memory.strip():
+            instructions.append("PARTICIPANT MEMORY:\n" + _text(participant_memory))
+        if semantic_memory.strip():
+            instructions.append("SEMANTIC MEMORY:\n" + _text(semantic_memory))
+
+        if mode == "memory_only":
+            history = []
+        elif mode == "memory_recent":
+            history = recent_history or []
+        else:
+            history = full_history or []
+
+        # Private requests must never fall back to common history (or vice versa).
+        if scope == "private":
+            history = private_history or []
+        normalized = [_message(x) for x in history if isinstance(x, dict)]
+        system_text = "\n\n".join(instructions)
+        fingerprint_data = {
+            "route_id": route_id, "mode": mode, "scope": scope,
+            "system": system_text, "history": normalized,
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(fingerprint_data, sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()
+        return {
+            "route_id": route_id, "mode": mode, "scope": scope,
+            "system_instructions": system_text,
+            "messages": normalized,
+            "context_fingerprint": fingerprint,
+            "source_counts": {"history": len(normalized),
+                              "system_sections": len(instructions)},
+        }
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+"""Scope-aware context assembly with enforced private access checks."""
+from __future__ import annotations
+
+import hashlib
+import json
+from typing import Any
+
+
+VALID_MODES = {"memory_only", "memory_recent", "full_history"}
+VALID_SCOPES = {"common", "private", "participant_system"}
+
+
+def _text(value: Any, limit: int = 20000) -> str:
+    result = str(value or "")
+    if len(result) > limit:
+        raise ValueError("context text exceeds the configured character limit")
+    return result
+
+
+def _message(row: dict[str, Any]) -> dict[str, str]:
+    role = str(row.get("role", "user"))
+    if role not in {"system", "user", "assistant"}:
+        role = "user"
+    return {"role": role, "content": _text(row.get("content"))}
+
+
+class ContextManager:
+    """Builds isolated context; private access is checked against PermissionManager."""
+
+    def __init__(self, permission_manager: Any = None, owner_id: str | None = None):
+        self.permission_manager = permission_manager
+        self.owner_id = str(owner_id or "").strip()
+
+    def _require_scope(self, *, requester_id: str | None, resource: str, scope: str) -> None:
+        if self.permission_manager is None:
+            raise PermissionError("permission manager is unavailable; private context denied")
+        if not requester_id:
+            raise PermissionError("requester identity is required")
+        self.permission_manager.require(
+            requester_id=str(requester_id),
+            resource=resource,
+            action="read",
+            scope=scope,
+        )
+
+    def build(
+        self,
+        *,
+        route_id: str,
+        mode: str,
+        owner_instructions: str = "",
+        participant_instructions: str = "",
+        participant_memory: str = "",
+        semantic_memory: str = "",
+        recent_history: list[dict[str, Any]] | None = None,
+        full_history: list[dict[str, Any]] | None = None,
+        private_history: list[dict[str, Any]] | None = None,
+        participant_history: list[dict[str, Any]] | None = None,
+        scope: str = "common",
+        requester_id: str | None = None,
+        chat_id: str | None = None,
+        participant_id: str | None = None,
+    ) -> dict[str, Any]:
+        if mode not in VALID_MODES:
+            raise ValueError("unknown context mode")
+        if scope not in VALID_SCOPES:
+            raise ValueError("unknown context scope")
+        if not route_id.startswith("route_") and route_id != "route_owner":
+            raise ValueError("invalid route identity")
+
+        if scope == "private":
+            selected_chat = str(chat_id or "").strip()
+            if not selected_chat:
+                raise PermissionError("private context requires a chat_id")
+            self._require_scope(
+                requester_id=requester_id,
+                resource="private-chat:" + selected_chat,
+                scope=selected_chat,
+            )
+        elif scope == "participant_system":
+            selected_participant = str(participant_id or "").strip()
+            if not selected_participant:
+                raise PermissionError("participant system context requires participant_id")
+            self._require_scope(
+                requester_id=requester_id,
+                resource="system-chat:" + selected_participant,
+                scope=selected_participant,
+            )
+
+        instructions = []
+        if str(owner_instructions or "").strip():
+            instructions.append("OWNER INSTRUCTIONS:\n" + _text(owner_instructions))
+        if str(participant_instructions or "").strip():
+            instructions.append(
+                "PARTICIPANT SYSTEM INSTRUCTIONS:\n" + _text(participant_instructions)
+            )
+        if str(participant_memory or "").strip():
+            instructions.append("PARTICIPANT MEMORY:\n" + _text(participant_memory))
+        if str(semantic_memory or "").strip():
+            instructions.append("SEMANTIC MEMORY:\n" + _text(semantic_memory))
+
+        if mode == "memory_only":
+            history = []
+        elif mode == "memory_recent":
+            history = list(recent_history or [])
+        else:
+            history = list(full_history or [])
+
+        if scope == "private":
+            history = list(private_history or [])
+        elif scope == "participant_system":
+            history = list(participant_history or [])
+
+        normalized = [_message(x) for x in history if isinstance(x, dict)]
+        system_text = "\n\n".join(instructions)
+        fingerprint_data = {
+            "route_id": route_id,
+            "mode": mode,
+            "scope": scope,
+            "chat_id": chat_id if scope == "private" else None,
+            "participant_id": participant_id if scope == "participant_system" else None,
+            "system": system_text,
+            "history": normalized,
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                fingerprint_data, sort_keys=True, ensure_ascii=False
+            ).encode("utf-8")
+        ).hexdigest()
+        return {
+            "route_id": route_id,
+            "mode": mode,
+            "scope": scope,
+            "system_instructions": system_text,
+            "messages": normalized,
+            "context_fingerprint": fingerprint,
+            "source_counts": {
+                "history": len(normalized),
+                "system_sections": len(instructions),
+            },
+        }
+NEW FRAGMENT END
+
+
+PATCH-ID: Q003-ISOLATION-TESTS-FIX-001
+
+TARGET FILE: tests/test_q003_isolation_contract.py
+
+PURPOSE:
+Исправить тесты под реальный PermissionManager API (issue_grant,
+revoke_grant, require с именованными аргументами) и проверять, что
+private context недоступен без реального grant и не смешивается с common.
+
+ORIGINAL FRAGMENT BEGIN
+"""Q-003 security contract tests; use temporary app data, no network."""
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from permission_manager import PermissionManager, PermissionDenied
+from context_manager import ContextManager
+
+class Q003PermissionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.owner = PermissionManager.load_or_create_owner_id(self.root)
+        self.pm = PermissionManager(self.root, self.owner)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_default_deny(self):
+        with self.assertRaises(PermissionDenied):
+            self.pm.require("participant-1", "private.read", "private")
+
+    def test_owner_grant_and_revoke(self):
+        self.pm.grant("participant-1", "private.read", "private", self.owner)
+        self.pm.require("participant-1", "private.read", "private")
+        self.pm.revoke("participant-1", "private.read", "private", self.owner)
+        with self.assertRaises(PermissionDenied):
+            self.pm.require("participant-1", "private.read", "private")
+
+    def test_corrupt_store_denies(self):
+        self.pm.path.write_text("{broken", encoding="utf-8")
+        with self.assertRaises(RuntimeError):
+            self.pm.require("participant-1", "private.read", "private")
+
+class Q003ContextTests(unittest.TestCase):
+    def test_private_requires_authorization(self):
+        cm = ContextManager()
+        with self.assertRaises(PermissionError):
+            cm.build(route_id="route_1", mode="full_history",
+                     scope="private", private_history=[{"content":"CANARY"}])
+
+    def test_private_does_not_mix_common_history(self):
+        cm = ContextManager()
+        result = cm.build(route_id="route_1", mode="full_history",
+            scope="private", authorized=True,
+            private_history=[{"role":"user","content":"PRIVATE_CANARY"}],
+            full_history=[{"role":"user","content":"COMMON_CANARY"}])
+        text = json.dumps(result)
+        self.assertIn("PRIVATE_CANARY", text)
+        self.assertNotIn("COMMON_CANARY", text)
+
+    def test_memory_only_has_no_history(self):
+        result = ContextManager().build(route_id="route_2", mode="memory_only",
+            recent_history=[{"role":"user","content":"HISTORY_CANARY"}])
+        self.assertEqual(result["messages"], [])
+
+if __name__ == "__main__":
+    unittest.main()
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+"""Q-003 permission and context-isolation contract tests; no network access."""
+import tempfile
+import unittest
+from pathlib import Path
+
+from context_manager import ContextManager
+from permission_manager import PermissionDenied, PermissionManager
+
+
+class Q003PermissionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.owner = PermissionManager.load_or_create_owner_id(self.root)
+        self.pm = PermissionManager(self.root, self.owner)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_default_deny(self):
+        with self.assertRaises(PermissionDenied):
+            self.pm.require(
+                requester_id=self.owner,
+                resource="private-chat:chat-1",
+                action="read",
+                scope="chat-1",
+            )
+
+    def test_owner_grant_and_revoke(self):
+        grant_id = self.pm.issue_grant(
+            actor_id=self.owner,
+            subject_id=self.owner,
+            resource="private-chat:chat-1",
+            action="read",
+            ttl_seconds=60,
+            scope="chat-1",
+        )
+        self.pm.require(
+            requester_id=self.owner,
+            resource="private-chat:chat-1",
+            action="read",
+            scope="chat-1",
+        )
+        self.assertTrue(self.pm.revoke_grant(actor_id=self.owner, grant_id=grant_id))
+        with self.assertRaises(PermissionDenied):
+            self.pm.require(
+                requester_id=self.owner,
+                resource="private-chat:chat-1",
+                action="read",
+                scope="chat-1",
+            )
+
+    def test_corrupt_store_fails_closed(self):
+        self.pm.path.write_text("{broken", encoding="utf-8")
+        with self.assertRaises(IOError):
+            PermissionManager(self.root, self.owner)
+
+
+class Q003ContextTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.owner = PermissionManager.load_or_create_owner_id(self.root)
+        self.pm = PermissionManager(self.root, self.owner)
+        self.context = ContextManager(self.pm, self.owner)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_private_requires_real_permission_grant(self):
+        with self.assertRaises(PermissionDenied):
+            self.context.build(
+                route_id="route_1",
+                mode="full_history",
+                scope="private",
+                requester_id=self.owner,
+                chat_id="chat-1",
+                private_history=[{"role": "user", "content": "PRIVATE_CANARY"}],
+            )
+
+    def test_private_context_excludes_common_history_after_grant(self):
+        self.pm.issue_grant(
+            actor_id=self.owner,
+            subject_id=self.owner,
+            resource="private-chat:chat-1",
+            action="read",
+            ttl_seconds=60,
+            scope="chat-1",
+        )
+        result = self.context.build(
+            route_id="route_1",
+            mode="full_history",
+            scope="private",
+            requester_id=self.owner,
+            chat_id="chat-1",
+            private_history=[{"role": "user", "content": "PRIVATE_CANARY"}],
+            full_history=[{"role": "user", "content": "COMMON_CANARY"}],
+        )
+        rendered = str(result)
+        self.assertIn("PRIVATE_CANARY", rendered)
+        self.assertNotIn("COMMON_CANARY", rendered)
+
+    def test_participant_system_scope_requires_grant(self):
+        with self.assertRaises(PermissionDenied):
+            self.context.build(
+                route_id="route_2",
+                mode="full_history",
+                scope="participant_system",
+                requester_id=self.owner,
+                participant_id="route_2",
+                participant_history=[{"role": "user", "content": "SYSTEM_CANARY"}],
+            )
+
+    def test_memory_only_has_no_history(self):
+        result = self.context.build(
+            route_id="route_2",
+            mode="memory_only",
+            recent_history=[{"role": "user", "content": "HISTORY_CANARY"}],
+        )
+        self.assertEqual(result["messages"], [])
+
+
+if __name__ == "__main__":
+    unittest.main()
+NEW FRAGMENT END
+
+
+PATCH-ID: Q003-CONTEXT-MANAGER-BOOTSTRAP-002
+
+TARGET FILE: main.py
+
+PURPOSE:
+Передать фактический PermissionManager и стабильный owner_id в ContextManager.
+
+ORIGINAL FRAGMENT BEGIN
+        from context_manager import ContextManager
+        self.context_manager = ContextManager()
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+        from context_manager import ContextManager
+        self.context_manager = ContextManager(self.permission_manager, self.owner_id)
+NEW FRAGMENT END
+
+
+
+PATCH-ID: Q003-I-CI-DIAGNOSTIC-BRANCH-001
+
+TARGET FILE: .github/workflows/ci.yml
+
+PURPOSE:
+Разрешить CI-тестам автоматически запускаться только при push в текущую
+диагностическую ветку. main и прочие ветки не меняются.
+
+ORIGINAL FRAGMENT BEGIN
+on:
+  push:
+    branches: ['main']
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+on:
+  push:
+    branches: ['main', 'diagnostic/q003-write-path-probe-20261101']
+NEW FRAGMENT END
+
+PATCH-ID: Q003-H-PRIVATE-CHAT-READ-GATE-003
+
+TARGET FILE: main.py
+PATCH STATUS: EXACT SOURCE CAPTURED — READY FOR TRANSFER
+
+PURPOSE:
+Создать стабильную идентичность приватного чата, проверить владельца
+и выполнить одноразовую read-проверку до загрузки приватной истории.
+Разрешение создаётся только в ответ на открытие пользователем приватного
+чата и немедленно отзывается после чтения.
+
+ORIGINAL FRAGMENT BEGIN
+        history = self.private_histories.setdefault(
+            participant_name, self.workspace.load_named_history(participant_name)
+        )
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+        private_chat_id = hashlib.sha256(
+            f"yj64-private-chat:{self.owner_id}:{route_id}".encode("utf-8")
+        ).hexdigest()[:32]
+        metadata = self.workspace.load_private_chat_metadata(participant_name)
+        metadata_path = self.workspace._private_metadata_path(participant_name)
+        if metadata is None:
+            if metadata_path.exists():
+                raise IOError("Private chat metadata is invalid; refusing access")
+            self.workspace.save_private_chat_metadata(
+                participant_name,
+                chat_id=private_chat_id,
+                owner_id=self.owner_id,
+                user_id=self.owner_id,
+            )
+            metadata = self.workspace.load_private_chat_metadata(participant_name)
+        if (
+            metadata is None
+            or metadata.get("owner_id") != self.owner_id
+            or metadata.get("user_id") != self.owner_id
+            or not metadata.get("chat_id")
+        ):
+            raise PermissionError("Private chat identity does not match this owner")
+        private_chat_id = str(metadata["chat_id"])
+        read_grant = self.permission_manager.issue_grant(
+            actor_id=self.owner_id,
+            subject_id=self.owner_id,
+            resource="private-chat:" + private_chat_id,
+            action="read",
+            ttl_seconds=120,
+            scope=private_chat_id,
+        )
+        try:
+            self.permission_manager.require(
+                requester_id=self.owner_id,
+                resource="private-chat:" + private_chat_id,
+                action="read",
+                scope=private_chat_id,
+            )
+            history = self.private_histories.setdefault(
+                participant_name, self.workspace.load_named_history(participant_name)
+            )
+        finally:
+            self.permission_manager.revoke_grant(
+                actor_id=self.owner_id, grant_id=read_grant
+            )
+NEW FRAGMENT END
+
+ACCEPTANCE:
+- Невалидные metadata не перезаписываются.
+- owner_id/user_id должны совпадать с локальным owner identity.
+- PermissionManager require выполняется до load_named_history.
+- Grant ограничен 120 секундами и отзывается в finally.
+
+---
+
+PATCH-ID: Q003-H-PRIVATE-CONTEXT-ROUTING-004
+
+TARGET FILE: main.py
+PATCH STATUS: EXACT SOURCE CAPTURED — READY FOR TRANSFER
+
+PURPOSE:
+Построить контекст приватного запроса только через ContextManager
+с private scope и chat_id. Common history не передаётся.
+
+ORIGINAL FRAGMENT BEGIN
+            private_context = list(self.private_histories.get(participant_name, []))
+            request_message = self._practical_instructions(message)
+            request_history = private_context + [
+                {"role": "user", "content": request_message}
+            ]
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+            private_context = list(self.private_histories.get(participant_name, []))
+            request_message = self._practical_instructions(message)
+            request_grant = None
+            try:
+                request_grant = self.permission_manager.issue_grant(
+                    actor_id=self.owner_id,
+                    subject_id=self.owner_id,
+                    resource="private-chat:" + private_chat_id,
+                    action="read",
+                    ttl_seconds=120,
+                    scope=private_chat_id,
+                )
+                request_context = self.context_manager.build(
+                    route_id=route_id,
+                    mode="full_history",
+                    scope="private",
+                    requester_id=self.owner_id,
+                    chat_id=private_chat_id,
+                    private_history=private_context + [
+                        {"role": "user", "content": request_message}
+                    ],
+                )
+                request_history = request_context["messages"]
+            except Exception as exc:
+                send.disabled = False
+                output.text += f"\\n\\nPRIVATE ACCESS DENIED: {type(exc).__name__}: {exc}"
+                self._append_report(
+                    "participant_private_context_denied",
+                    participant=participant_name,
+                    route_id=route_id,
+                    error_type=type(exc).__name__,
+                )
+                return
+            finally:
+                if request_grant:
+                    self.permission_manager.revoke_grant(
+                        actor_id=self.owner_id, grant_id=request_grant
+                    )
+NEW FRAGMENT END
+
+ACCEPTANCE:
+- ContextManager проверяет permission grant.
+- История ограничена текущим приватным чатом.
+- Grant отзывается сразу после сборки request context.
+- Никакого fallback к common_history нет.
+
+---
+
+PATCH-ID: Q003-H-PRIVATE-HISTORY-WRITE-GATE-005
+
+TARGET FILE: main.py
+PATCH STATUS: EXACT SOURCE CAPTURED — READY FOR TRANSFER
+
+PURPOSE:
+Защитить запись приватной истории отдельным write grant. Сначала
+сформировать новый список без изменения in-memory state, затем проверить
+право и сохранить его на диск. При отказе память и файл не расходятся.
+
+ORIGINAL FRAGMENT BEGIN
+                        self.private_histories.setdefault(participant_name, []).extend(exchange)
+                        self.workspace.save_named_history(
+                            participant_name, self.private_histories[participant_name]
+                        )
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+                        updated_private_history = list(
+                            self.private_histories.get(participant_name, [])
+                        ) + exchange
+                        write_grant = None
+                        try:
+                            write_grant = self.permission_manager.issue_grant(
+                                actor_id=self.owner_id,
+                                subject_id=self.owner_id,
+                                resource="private-chat:" + private_chat_id,
+                                action="write",
+                                ttl_seconds=120,
+                                scope=private_chat_id,
+                            )
+                            self.permission_manager.require(
+                                requester_id=self.owner_id,
+                                resource="private-chat:" + private_chat_id,
+                                action="write",
+                                scope=private_chat_id,
+                            )
+                            self.workspace.save_named_history(
+                                participant_name, updated_private_history
+                            )
+                            self.private_histories[participant_name] = updated_private_history
+                        except Exception as exc:
+                            output.text += (
+                                f"\\n\\nPRIVATE HISTORY SAVE DENIED: "
+                                f"{type(exc).__name__}: {exc}"
+                            )
+                            self._append_report(
+                                "participant_private_history_write_denied",
+                                participant=participant_name,
+                                route_id=route_id,
+                                error_type=type(exc).__name__,
+                            )
+                            send.disabled = False
+                            return
+                        finally:
+                            if write_grant:
+                                self.permission_manager.revoke_grant(
+                                    actor_id=self.owner_id, grant_id=write_grant
+                                )
+NEW FRAGMENT END
+
+ACCEPTANCE:
+- Запись требует точного resource/action/scope grant.
+- Grant создаётся только в ответ на пользовательскую отправку в private chat.
+- При ошибке файл и in-memory history не обновляются.
+- Grant отзывается в finally.
+- Ошибка записывается без содержимого приватных сообщений.
+
+---
+
+
+PATCH-ID: Q003-H-SKILLS-READ-WRITE-GATE-006
+
+TARGET FILE: main.py
+PATCH STATUS: EXACT SOURCE CAPTURED — GUARD ONLY; NOT TRANSFERRED
+
+PURPOSE:
+Защитить чтение и изменение локального файла YJ-64 local skills.
+Разрешения выдаются только на время явного открытия редактора и явного
+нажатия SAVE SKILLS; при ошибке операция завершается отказом.
+
+ORIGINAL FRAGMENT BEGIN
+    def _open_skills_editor(self, *_: Any) -> None:
+        content = BoxLayout(orientation="vertical", spacing=8, padding=10)
+        editor = TextInput(text=self.workspace.read_skills(), multiline=True)
+        content.add_widget(editor)
+        status = Label(text=f"Stored locally: {self.workspace.skills_path}", size_hint_y=None, height=44)
+        content.add_widget(status)
+        buttons = BoxLayout(size_hint_y=None, height=52, spacing=8)
+        save = FeedbackButton(text="SAVE SKILLS")
+        close = FeedbackButton(text="CLOSE")
+        buttons.add_widget(save)
+        buttons.add_widget(close)
+        content.add_widget(buttons)
+        popup = Popup(title="LOCAL SKILLS FILE", content=content, size_hint=(0.96, 0.9))
+        def save_skills(*_args: Any) -> None:
+            self.workspace.write_skills(editor.text)
+            self._append_report("skills_file_saved", character_count=len(editor.text))
+            status.text = "Saved locally. Instructions are added to future chat prompts."
+        save.bind(on_release=save_skills)
+        close.bind(on_release=lambda *_: popup.dismiss())
+        popup.open()
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+    def _open_skills_editor(self, *_: Any) -> None:
+        content = BoxLayout(orientation="vertical", spacing=8, padding=10)
+        read_grant = None
+        try:
+            read_grant = self.permission_manager.issue_grant(
+                actor_id=self.owner_id,
+                subject_id=self.owner_id,
+                resource="local-skills",
+                action="read",
+                ttl_seconds=120,
+                scope="owner",
+            )
+            self.permission_manager.require(
+                requester_id=self.owner_id,
+                resource="local-skills",
+                action="read",
+                scope="owner",
+            )
+            skills_text = self.workspace.read_skills()
+        except Exception as exc:
+            self._append_report(
+                "skills_file_read_denied",
+                error_type=type(exc).__name__,
+            )
+            self.status.text = f"Skills access denied: {type(exc).__name__}"
+            return
+        finally:
+            if read_grant:
+                self.permission_manager.revoke_grant(
+                    actor_id=self.owner_id, grant_id=read_grant
+                )
+        editor = TextInput(text=skills_text, multiline=True)
+        content.add_widget(editor)
+        status = Label(text=f"Stored locally: {self.workspace.skills_path}", size_hint_y=None, height=44)
+        content.add_widget(status)
+        buttons = BoxLayout(size_hint_y=None, height=52, spacing=8)
+        save = FeedbackButton(text="SAVE SKILLS")
+        close = FeedbackButton(text="CLOSE")
+        buttons.add_widget(save)
+        buttons.add_widget(close)
+        content.add_widget(buttons)
+        popup = Popup(title="LOCAL SKILLS FILE", content=content, size_hint=(0.96, 0.9))
+        def save_skills(*_args: Any) -> None:
+            write_grant = None
+            try:
+                write_grant = self.permission_manager.issue_grant(
+                    actor_id=self.owner_id,
+                    subject_id=self.owner_id,
+                    resource="local-skills",
+                    action="write",
+                    ttl_seconds=120,
+                    scope="owner",
+                )
+                self.permission_manager.require(
+                    requester_id=self.owner_id,
+                    resource="local-skills",
+                    action="write",
+                    scope="owner",
+                )
+                self.workspace.write_skills(editor.text)
+                self._append_report("skills_file_saved", character_count=len(editor.text))
+                status.text = "Saved locally. Instructions are added to future chat prompts."
+            except Exception as exc:
+                self._append_report(
+                    "skills_file_write_denied",
+                    error_type=type(exc).__name__,
+                )
+                status.text = f"Skills save denied: {type(exc).__name__}"
+            finally:
+                if write_grant:
+                    self.permission_manager.revoke_grant(
+                        actor_id=self.owner_id, grant_id=write_grant
+                    )
+        save.bind(on_release=save_skills)
+        close.bind(on_release=lambda *_: popup.dismiss())
+        popup.open()
+NEW FRAGMENT END
+
+ACCEPTANCE:
+- read grant проверяется до workspace.read_skills().
+- write grant проверяется до workspace.write_skills().
+- resource/action/scope точные: local-skills / read|write / owner.
+- grants отзываются в finally.
+- при отказе файл не изменяется; audit report содержит только тип ошибки,
+  а не текст локальных skills.
+- переносить в main.py только после отдельной проверки exact-match и SHA.
+
+---
+
+
+
+PATCH-ID: Q003-H-PRIVATE-EXCHANGE-PUBLISH-GATE-007
+
+TARGET FILE: main.py
+PATCH STATUS: EXACT SOURCE CAPTURED — GUARD ONLY; NOT TRANSFERRED
+
+PURPOSE:
+Защитить явную публикацию выбранного приватного обмена в текущий общий
+чат. Сначала проверяется common-chat write grant, затем сохраняется новый
+список сообщений; in-memory state обновляется только после успешной записи.
+
+ORIGINAL FRAGMENT BEGIN
+        def publish_last_exchange(*_args: Any) -> None:
+            exchange = last_exchange.get("messages")
+            if not exchange:
+                output.text += "\n\nNo completed private exchange to publish."
+                return
+            if last_exchange.get("published"):
+                output.text += "\n\nThis exchange was already published."
+                return
+            self.common_history.extend(exchange)
+            rendered = "\n\n".join(
+                f"{'Owner' if item['role'] == 'user' else participant_name}:\n{item['content']}"
+                for item in exchange
+            )
+            self.chat_output.text += f"\n\n[PUBLISHED FROM {participant_name} PRIVATE CHAT]\n{rendered}"
+            last_exchange["published"] = True
+            self._append_report(
+                "participant_private_exchange_published",
+                participant=participant_name,
+                route_id=route_id,
+                message_count=len(exchange),
+            )
+            self.status.text = f"Last private exchange from {participant_name} published to common chat."
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+        def publish_last_exchange(*_args: Any) -> None:
+            exchange = last_exchange.get("messages")
+            if not exchange:
+                output.text += "\n\nNo completed private exchange to publish."
+                return
+            if last_exchange.get("published"):
+                output.text += "\n\nThis exchange was already published."
+                return
+            publish_grant = None
+            try:
+                publish_grant = self.permission_manager.issue_grant(
+                    actor_id=self.owner_id,
+                    subject_id=self.owner_id,
+                    resource="common-chat:" + str(self.current_chat_id),
+                    action="write",
+                    ttl_seconds=120,
+                    scope=str(self.current_chat_id),
+                )
+                self.permission_manager.require(
+                    requester_id=self.owner_id,
+                    resource="common-chat:" + str(self.current_chat_id),
+                    action="write",
+                    scope=str(self.current_chat_id),
+                )
+                updated_common_history = list(self.common_history) + list(exchange)
+                self.workspace.save_messages(
+                    self.current_chat_id, updated_common_history
+                )
+                self.common_history = updated_common_history
+            except Exception as exc:
+                output.text += (
+                    f"\n\nPUBLISH DENIED: {type(exc).__name__}: {exc}"
+                )
+                self._append_report(
+                    "participant_private_exchange_publish_denied",
+                    participant=participant_name,
+                    route_id=route_id,
+                    error_type=type(exc).__name__,
+                )
+                return
+            finally:
+                if publish_grant:
+                    self.permission_manager.revoke_grant(
+                        actor_id=self.owner_id, grant_id=publish_grant
+                    )
+            rendered = "\n\n".join(
+                f"{'Owner' if item['role'] == 'user' else participant_name}:\n{item['content']}"
+                for item in exchange
+            )
+            self.chat_output.text += f"\n\n[PUBLISHED FROM {participant_name} PRIVATE CHAT]\n{rendered}"
+            last_exchange["published"] = True
+            self._append_report(
+                "participant_private_exchange_published",
+                participant=participant_name,
+                route_id=route_id,
+                message_count=len(exchange),
+            )
+            self.status.text = f"Last private exchange from {participant_name} published to common chat."
+NEW FRAGMENT END
+
+ACCEPTANCE:
+- Публикация возможна только через явное действие PUBLISH LAST EXCHANGE.
+- resource/action/scope точные: common-chat:<current_chat_id> / write /
+  <current_chat_id>.
+- Common history сохраняется на диск до обновления in-memory state.
+- При отказе common history и UI не публикуются; last_exchange.published
+  остаётся false.
+- Grant отзывается в finally; audit не содержит текста обмена.
+- Переносить только после проверки exact-match и SHA.
+
+---
+
+
+
+PATCH-ID: Q003-H-COMMON-ARCHIVE-CREATE-GATE-008
+
+TARGET FILE: main.py
+PATCH STATUS: EXACT SOURCE CAPTURED — GUARD ONLY; NOT TRANSFERRED
+
+PURPOSE:
+Проверять право записи текущей общей истории до её сохранения и право
+чтения общего архива до формирования ZIP. Не меняет формат ZIP, manifest,
+инкрементальное слияние и механизм Android document picker.
+
+ORIGINAL FRAGMENT BEGIN
+    def _create_memory_archive(self, *_: Any) -> None:
+        """Create a portable ZIP then let Android's document picker save it outside app data."""
+        try:
+            self._save_common_history()
+            temp_path = Path(self.user_data_dir) / "YJ-64-backup.zip"
+            self.persistent_core.export_archive(temp_path)
+            from jnius import autoclass
+            Intent = autoclass("android.content.Intent")
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
+            intent.addCategory(Intent.CATEGORY_OPENABLE)
+            intent.setType("application/zip")
+            intent.putExtra(Intent.EXTRA_TITLE, "YJ-64-backup.zip")
+            self._archive_export_path = str(temp_path)
+            PythonActivity.mActivity.startActivityForResult(intent, 4701)
+            self.status.text = "Выбери папку для сохранения YJ-64-backup.zip."
+            self._append_report("memory_archive_export_picker_opened", archive_size=temp_path.stat().st_size)
+        except Exception as exc:
+            self.status.text = "Не удалось создать архив: " + str(exc)
+            self._append_report("memory_archive_export_failed", error=str(exc))
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+    def _create_memory_archive(self, *_: Any) -> None:
+        """Create a portable ZIP then let Android's document picker save it outside app data."""
+        try:
+            chat_id = str(self.current_chat_id)
+            common_write_grant = self.permission_manager.issue_grant(
+                actor_id=self.owner_id,
+                subject_id=self.owner_id,
+                resource="common-chat:" + chat_id,
+                action="write",
+                ttl_seconds=120,
+                scope=chat_id,
+            )
+            try:
+                self.permission_manager.require(
+                    requester_id=self.owner_id,
+                    resource="common-chat:" + chat_id,
+                    action="write",
+                    scope=chat_id,
+                )
+                self._save_common_history()
+            finally:
+                self.permission_manager.revoke_grant(
+                    actor_id=self.owner_id, grant_id=common_write_grant
+                )
+            archive_read_grant = self.permission_manager.issue_grant(
+                actor_id=self.owner_id,
+                subject_id=self.owner_id,
+                resource="common-archive",
+                action="read",
+                ttl_seconds=120,
+                scope="owner",
+            )
+            try:
+                self.permission_manager.require(
+                    requester_id=self.owner_id,
+                    resource="common-archive",
+                    action="read",
+                    scope="owner",
+                )
+                temp_path = Path(self.user_data_dir) / "YJ-64-backup.zip"
+                self.persistent_core.export_archive(temp_path)
+            finally:
+                self.permission_manager.revoke_grant(
+                    actor_id=self.owner_id, grant_id=archive_read_grant
+                )
+            from jnius import autoclass
+            Intent = autoclass("android.content.Intent")
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
+            intent.addCategory(Intent.CATEGORY_OPENABLE)
+            intent.setType("application/zip")
+            intent.putExtra(Intent.EXTRA_TITLE, "YJ-64-backup.zip")
+            self._archive_export_path = str(temp_path)
+            PythonActivity.mActivity.startActivityForResult(intent, 4701)
+            self.status.text = "Выбери папку для сохранения YJ-64-backup.zip."
+            self._append_report("memory_archive_export_picker_opened", archive_size=temp_path.stat().st_size)
+        except Exception as exc:
+            self.status.text = "Не удалось создать архив: " + str(exc)
+            self._append_report("memory_archive_export_failed", error=str(exc))
+NEW FRAGMENT END
+
+ACCEPTANCE:
+- common-chat:<current_chat_id>/write проверяется до _save_common_history.
+- common-archive/read/owner проверяется до export_archive.
+- Оба временных grant отзываются в finally.
+- При отказе ZIP не создаётся/не предлагается к сохранению.
+- Не добавлять private histories в общий архив; старые ZIP не сканировать
+  и не переписывать.
+- Переносить только после проверки exact-match и SHA.
+
+---
+
+
+
+PATCH-ID: Q003-H-AUTO-ARCHIVE-PUBLISH-GATE-009
+
+TARGET FILE: main.py
+PATCH STATUS: EXACT SOURCE CAPTURED — GUARD ONLY; NOT TRANSFERRED
+
+PURPOSE:
+Защитить автоматический экспорт общего архива: сохранение текущей общей
+истории, чтение данных при сборке ZIP и публикацию ZIP в Download/YJ-64.
+Существующую проверку readback, SHA-256, ZIP integrity и удаление
+незавершённой MediaStore-записи сохранить без изменений.
+
+ORIGINAL FRAGMENT BEGIN
+    def _auto_export_download_archive(self, *_: Any) -> None:
+        """Create a verified archive in public Downloads/YJ-64 without opening a picker."""
+        temp_path = Path(self.user_data_dir) / "YJ-64-backup-auto.zip"
+        verify_path = Path(self.user_data_dir) / "YJ-64-backup-auto-verify.zip"
+        uri = None
+        try:
+            self._save_common_history()
+            # Собрать private chat records из histories/*.json и sidecar metadata.
+            # Неизвестные/неполные записи исключить из обоих типов экспорта.
+            # requester_id получить из стабильного локального owner identity.
+            # Для каждой записи проверить classify_chat и check_private_access.
+            # Создать отдельный временный ZIP на каждый разрешённый chat_id.
+            # Каждый личный ZIP опубликовать отдельной записью MediaStore
+            # в Download/YJ-64 и проверить readback так же, как общий ZIP.
+            self.persistent_core.export_archive(temp_path)
+            from jnius import autoclass
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            ContentValues = autoclass("android.content.ContentValues")
+            MediaStoreDownloads = autoclass("android.provider.MediaStore$Downloads")
+            resolver = PythonActivity.mActivity.getContentResolver()
+            stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+            values = ContentValues()
+            values.put("display_name", "YJ-64-backup-" + stamp + ".zip")
+            values.put("mime_type", "application/zip")
+            values.put("relative_path", "Download/YJ-64/")
+            values.put("is_pending", 1)
+            uri = resolver.insert(MediaStoreDownloads.EXTERNAL_CONTENT_URI, values)
+            if uri is None:
+                raise IOError("Android MediaStore did not create a Downloads file")
+            output = resolver.openOutputStream(uri)
+            if output is None:
+                raise IOError("Android could not open the Downloads archive for writing")
+            source_digest = hashlib.sha256(temp_path.read_bytes()).hexdigest()
+            copied = 0
+            try:
+                with temp_path.open("rb") as source:
+                    while True:
+                        chunk = source.read(65536)
+                        if not chunk:
+                            break
+                        for value_byte in chunk:
+                            output.write(value_byte)
+                        copied += len(chunk)
+                output.flush()
+            finally:
+                output.close()
+            expected = temp_path.stat().st_size
+            if copied != expected or copied <= 0:
+                raise IOError(f"Downloads archive size mismatch: {copied} of {expected} bytes")
+            readback = resolver.openInputStream(uri)
+            if readback is None:
+                raise IOError("Android could not reopen the Downloads archive")
+            read_count = 0
+            try:
+                with verify_path.open("wb") as verify_file:
+                    while True:
+                        value_byte = int(readback.read())
+                        if value_byte < 0:
+                            break
+                        verify_file.write(bytes((value_byte & 0xff,)))
+                        read_count += 1
+            finally:
+                readback.close()
+            import zipfile
+            read_digest = hashlib.sha256(verify_path.read_bytes()).hexdigest() if verify_path.is_file() else ""
+            if read_count != copied or read_digest != source_digest or not zipfile.is_zipfile(verify_path):
+                raise IOError("Downloads archive read-back, SHA-256 or ZIP integrity check failed")
+            with zipfile.ZipFile(verify_path, "r") as check_zip:
+                bad_member = check_zip.testzip()
+                if bad_member or "manifest.json" not in check_zip.namelist():
+                    raise IOError("Downloads archive is incomplete or has a corrupt member")
+            values_done = ContentValues()
+            values_done.put("is_pending", 0)
+            resolver.update(uri, values_done, None, None)
+            self._append_report("memory_archive_auto_download_succeeded",
+                                size_bytes=copied, readback_bytes=read_count,
+                                location="Download/YJ-64", zip_integrity_verified=True)
+            self._archive_auto_export_error = ""
+        except Exception as exc:
+            self._archive_auto_export_error = f"{type(exc).__name__}: {exc}"
+            self.status.text = (
+                "Автосохранение архива не удалось: "
+                + self._archive_auto_export_error
+            )
+            self._append_report(
+                "memory_archive_auto_download_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                location="Download/YJ-64",
+            )
+            if uri is not None:
+                try:
+                    from jnius import autoclass
+                    PythonActivity = autoclass("org.kivy.android.PythonActivity")
+                    PythonActivity.mActivity.getContentResolver().delete(
+                        uri, None, None
+                    )
+                except Exception:
+                    pass
+        finally:
+            temp_path.unlink(missing_ok=True)
+            verify_path.unlink(missing_ok=True)
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+    def _auto_export_download_archive(self, *_: Any) -> None:
+        """Create a verified archive in public Downloads/YJ-64 without opening a picker."""
+        temp_path = Path(self.user_data_dir) / "YJ-64-backup-auto.zip"
+        verify_path = Path(self.user_data_dir) / "YJ-64-backup-auto-verify.zip"
+        uri = None
+        publish_grant = None
+        try:
+            chat_id = str(self.current_chat_id)
+            common_write_grant = self.permission_manager.issue_grant(
+                actor_id=self.owner_id, subject_id=self.owner_id,
+                resource="common-chat:" + chat_id, action="write",
+                ttl_seconds=120, scope=chat_id,
+            )
+            try:
+                self.permission_manager.require(
+                    requester_id=self.owner_id,
+                    resource="common-chat:" + chat_id,
+                    action="write", scope=chat_id,
+                )
+                self._save_common_history()
+            finally:
+                self.permission_manager.revoke_grant(
+                    actor_id=self.owner_id, grant_id=common_write_grant
+                )
+            # Собрать private chat records из histories/*.json и sidecar metadata.
+            # Неизвестные/неполные записи исключить из обоих типов экспорта.
+            # requester_id получить из стабильного локального owner identity.
+            # Для каждой записи проверить classify_chat и check_private_access.
+            # Создать отдельный временный ZIP на каждый разрешённый chat_id.
+            # Каждый личный ZIP опубликовать отдельной записью MediaStore
+            # в Download/YJ-64 и проверить readback так же, как общий ZIP.
+            archive_read_grant = self.permission_manager.issue_grant(
+                actor_id=self.owner_id, subject_id=self.owner_id,
+                resource="common-archive", action="read",
+                ttl_seconds=120, scope="owner",
+            )
+            try:
+                self.permission_manager.require(
+                    requester_id=self.owner_id, resource="common-archive",
+                    action="read", scope="owner",
+                )
+                self.persistent_core.export_archive(temp_path)
+            finally:
+                self.permission_manager.revoke_grant(
+                    actor_id=self.owner_id, grant_id=archive_read_grant
+                )
+            from jnius import autoclass
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            ContentValues = autoclass("android.content.ContentValues")
+            MediaStoreDownloads = autoclass("android.provider.MediaStore$Downloads")
+            resolver = PythonActivity.mActivity.getContentResolver()
+            stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+            values = ContentValues()
+            values.put("display_name", "YJ-64-backup-" + stamp + ".zip")
+            values.put("mime_type", "application/zip")
+            values.put("relative_path", "Download/YJ-64/")
+            values.put("is_pending", 1)
+            publish_grant = self.permission_manager.issue_grant(
+                actor_id=self.owner_id, subject_id=self.owner_id,
+                resource="common-archive", action="publish",
+                ttl_seconds=180, scope="downloads",
+            )
+            self.permission_manager.require(
+                requester_id=self.owner_id, resource="common-archive",
+                action="publish", scope="downloads",
+            )
+            uri = resolver.insert(MediaStoreDownloads.EXTERNAL_CONTENT_URI, values)
+            if uri is None:
+                raise IOError("Android MediaStore did not create a Downloads file")
+            output = resolver.openOutputStream(uri)
+            if output is None:
+                raise IOError("Android could not open the Downloads archive for writing")
+            source_digest = hashlib.sha256(temp_path.read_bytes()).hexdigest()
+            copied = 0
+            try:
+                with temp_path.open("rb") as source:
+                    while True:
+                        chunk = source.read(65536)
+                        if not chunk:
+                            break
+                        for value_byte in chunk:
+                            output.write(value_byte)
+                        copied += len(chunk)
+                output.flush()
+            finally:
+                output.close()
+            expected = temp_path.stat().st_size
+            if copied != expected or copied <= 0:
+                raise IOError(f"Downloads archive size mismatch: {copied} of {expected} bytes")
+            readback = resolver.openInputStream(uri)
+            if readback is None:
+                raise IOError("Android could not reopen the Downloads archive")
+            read_count = 0
+            try:
+                with verify_path.open("wb") as verify_file:
+                    while True:
+                        value_byte = int(readback.read())
+                        if value_byte < 0:
+                            break
+                        verify_file.write(bytes((value_byte & 0xff,)))
+                        read_count += 1
+            finally:
+                readback.close()
+            import zipfile
+            read_digest = hashlib.sha256(verify_path.read_bytes()).hexdigest() if verify_path.is_file() else ""
+            if read_count != copied or read_digest != source_digest or not zipfile.is_zipfile(verify_path):
+                raise IOError("Downloads archive read-back, SHA-256 or ZIP integrity check failed")
+            with zipfile.ZipFile(verify_path, "r") as check_zip:
+                bad_member = check_zip.testzip()
+                if bad_member or "manifest.json" not in check_zip.namelist():
+                    raise IOError("Downloads archive is incomplete or has a corrupt member")
+            values_done = ContentValues()
+            values_done.put("is_pending", 0)
+            resolver.update(uri, values_done, None, None)
+            self._append_report("memory_archive_auto_download_succeeded",
+                                size_bytes=copied, readback_bytes=read_count,
+                                location="Download/YJ-64", zip_integrity_verified=True)
+            self._archive_auto_export_error = ""
+        except Exception as exc:
+            self._archive_auto_export_error = f"{type(exc).__name__}: {exc}"
+            self.status.text = (
+                "Автосохранение архива не удалось: "
+                + self._archive_auto_export_error
+            )
+            self._append_report(
+                "memory_archive_auto_download_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                location="Download/YJ-64",
+            )
+            if uri is not None:
+                try:
+                    from jnius import autoclass
+                    PythonActivity = autoclass("org.kivy.android.PythonActivity")
+                    PythonActivity.mActivity.getContentResolver().delete(
+                        uri, None, None
+                    )
+                except Exception:
+                    pass
+        finally:
+            if publish_grant:
+                self.permission_manager.revoke_grant(
+                    actor_id=self.owner_id, grant_id=publish_grant
+                )
+            temp_path.unlink(missing_ok=True)
+            verify_path.unlink(missing_ok=True)
+NEW FRAGMENT END
+
+ACCEPTANCE:
+- common-chat:<current_chat_id>/write до _save_common_history.
+- common-archive/read/owner до export_archive.
+- common-archive/publish/downloads до MediaStore insert и всей публикации.
+- Каждый grant отзывается при успехе и исключении.
+- При отказе публикации общий ZIP не становится видимым в Downloads.
+- Не экспортировать private histories в общий ZIP; старые ZIP не менять.
+- Переносить только после exact-match/SHA и тестов отказа до side effects.
+
+---
+
+
 РАЗДЕЛ 5. КОНЕЦ ОПЕРАЦИОННОГО СТОЛА
 
 Перед переносом каждого патча:
@@ -756,10 +4206,24 @@ Q003-I. ФУНКЦИОНАЛЬНЫЕ ТЕСТЫ И ДОПУСК
 
 Контрольные значения — Git blob SHA-1.
 
-EXPECTED-GIT-BLOB-SHA:main.py=95a1c222f162d46a6cc2af1e442dfeb9114126e0
-EXPECTED-GIT-BLOB-SHA:chat_workspace.py=a69bd79e619bfccf79eb596ed7a9f7bbe0bf0c39
+EXPECTED-GIT-BLOB-SHA:yj64_persistent_core.py=3e935812fa082694eb138eef051379e78d051a46
+EXPECTED-GIT-BLOB-SHA:permission_manager.py=cc83c8c44daffe833e51da7365575b939c570299
+EXPECTED-GIT-BLOB-SHA:semantic_memory.py=b992af2241afd576f388d4bd46332772a95fd742
+EXPECTED-GIT-BLOB-SHA:context_manager.py=7659ea75cc4d140abb8a91a64c273eca1114cf5e
+EXPECTED-GIT-BLOB-SHA:system_chat.py=f08299ed57ee3935130a861ab26bc268eadb1aa9
+EXPECTED-GIT-BLOB-SHA:tests/test_permission_manager.py=793e41544837e52b6d585d9d36dda0d01e2b5336
+EXPECTED-GIT-BLOB-SHA:tests/test_q003_isolation_contract.py=a71371af71d3973cecf3395823b410d7b8d25f6d
+EXPECTED-GIT-BLOB-SHA:android_src/org/blackmirror/blackmirror/DiagnosticMonitorProvider.java=32912c44b7464b2b368b23bbc0292e9cbf5411c5
+EXPECTED-GIT-BLOB-SHA:monitor-app/app/src/main/java/org/blackmirror/yj64monitor/DiagnosticReportProvider.java=fcefde60e695c5636eec88e78a27a874b33f015f
+EXPECTED-GIT-BLOB-SHA:monitor-app/app/src/main/AndroidManifest.xml=b3e810ff69c5d8c0723d0ee043c04b1fb984feb0
+EXPECTED-GIT-BLOB-SHA:monitor-app/app/src/main/java/org/blackmirror/yj64monitor/MonitorActivity.java=5cb703fd27dec970dc8f6eec1d2759cc3016ec32
+EXPECTED-GIT-BLOB-SHA:p4a/hook.py=8bd8773bf507df80868cf4e928f64cb76fce9df7
+EXPECTED-GIT-BLOB-SHA:.github/workflows/ci.yml=df02b8462b83c6b6b222b8e1042f9aef91fe2336
+EXPECTED-GIT-BLOB-SHA:.github/workflows/android-apk.yml=1171692879cbfb8dcd1ac2b64f8e21dfa280259e
+EXPECTED-GIT-BLOB-SHA:main.py=576619c47db9ea28c71b283bb08d6310c4ee9f75
+EXPECTED-GIT-BLOB-SHA:chat_workspace.py=729f67f0e2048e23c3136a9e468f009e713adba8
 EXPECTED-GIT-BLOB-SHA:llm_api.py=37c0708b118ad496ed8fbf9663f0d301993ed3c6
-EXPECTED-GIT-BLOB-SHA:buildozer.spec=f937a18d10eb6efc3a284f6ea907dd460d482451
+EXPECTED-GIT-BLOB-SHA:buildozer.spec=b6641d141aa8c885805a662980bc4705a9f3ae6b
 
 После каждого согласованного переноса изменения в рабочие файлы
 контрольные SHA должны быть обновлены по фактическому содержимому.
@@ -879,4 +4343,1140 @@ TESTS:
 
 ============================================================
 КОНЕЦ PROTECTED-LINE-GUARD
+
+
+
+---
+
+PATCH-ID: Q003-B-PERMISSION-MANAGER-001
+
+TARGET FILE: permission_manager.py
+
+PURPOSE:
+
+Создать единый локальный Permission Manager с политикой Default Deny,
+временными разрешениями, немедленным отзывом и аудитом. Этот модуль —
+первый исполняемый компонент Q-003-B; сам по себе он не считается
+полной интеграцией до подключения проверок к каждой операции приложения.
+
+ORIGINAL FRAGMENT BEGIN
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+"""Default-deny permission policy for YJ-64 local operations.
+
+This is an application policy layer, not an OS security boundary. Code
+running with the same process privileges must not be treated as hostile
+sandboxed code.
+"""
+from __future__ import annotations
+
+import json
+import os
+import threading
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+
+class PermissionDenied(PermissionError):
+    """Raised when an operation has no currently valid grant."""
+
+
+class PermissionManager:
+    @classmethod
+    def load_or_create_owner_id(cls, user_data_dir: str | Path) -> str:
+        identity_path = (
+            Path(user_data_dir) / "yj64-workspace" / "owner-identity.json"
+        )
+        identity_path.parent.mkdir(parents=True, exist_ok=True)
+        if identity_path.exists():
+            try:
+                value = json.loads(identity_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError) as exc:
+                raise IOError("Owner identity is unreadable; refusing to replace it") from exc
+            owner_id = str(value.get("owner_id") or "").strip() if isinstance(value, dict) else ""
+            if not owner_id or value.get("schema") != "yj64.owner-identity.v1":
+                raise IOError("Owner identity has an invalid schema")
+            return owner_id
+        owner_id = uuid.uuid4().hex
+        cls._atomic_write(
+            identity_path,
+            json.dumps(
+                {"schema": "yj64.owner-identity.v1", "owner_id": owner_id},
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
+        return owner_id
+
+    ACTIONS = frozenset({
+        "read", "write", "commit", "build", "publish", "service_management"
+    })
+    SCHEMA = "yj64.permissions.v1"
+
+    def __init__(
+        self,
+        user_data_dir: str | Path,
+        owner_id: str,
+        *,
+        clock=time.time,
+    ) -> None:
+        self.root = Path(user_data_dir) / "yj64-workspace"
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.path = self.root / "permissions.json"
+        self.audit_path = self.root / "permission-audit.jsonl"
+        self.owner_id = str(owner_id).strip()
+        if not self.owner_id:
+            raise ValueError("owner_id is required")
+        self._clock = clock
+        self._lock = threading.RLock()
+        self._state = self._load()
+
+    @staticmethod
+    def _atomic_write(path: Path, payload: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+        try:
+            with temp.open("w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, path)
+        finally:
+            temp.unlink(missing_ok=True)
+
+    def _load(self) -> dict[str, Any]:
+        if not self.path.exists():
+            return {"schema": self.SCHEMA, "grants": []}
+        try:
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as exc:
+            raise IOError("Permission store is unreadable; refusing access") from exc
+        if (
+            not isinstance(value, dict)
+            or value.get("schema") != self.SCHEMA
+            or not isinstance(value.get("grants"), list)
+        ):
+            raise IOError("Permission store has an invalid schema; refusing access")
+        return value
+
+    def _save(self) -> None:
+        self._atomic_write(
+            self.path, json.dumps(self._state, ensure_ascii=False, indent=2)
+        )
+
+    def _audit(
+        self, decision: str, *, subject_id: str, resource: str,
+        action: str, reason: str, grant_id: str | None = None,
+    ) -> None:
+        record = {
+            "schema": self.SCHEMA,
+            "timestamp_ms": int(self._clock() * 1000),
+            "decision": decision,
+            "subject_id": subject_id,
+            "resource": resource,
+            "action": action,
+            "reason": reason,
+            "grant_id": grant_id,
+        }
+        self.audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.audit_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    def issue_grant(
+        self,
+        *,
+        actor_id: str,
+        subject_id: str,
+        resource: str,
+        action: str,
+        ttl_seconds: int,
+        scope: str,
+    ) -> str:
+        actor = str(actor_id).strip()
+        subject = str(subject_id).strip()
+        resource_key = str(resource).strip()
+        scope_key = str(scope).strip()
+        if actor != self.owner_id:
+            raise PermissionDenied("Only the owner may issue a grant")
+        if not subject or not resource_key or not scope_key:
+            raise ValueError("subject_id, resource and scope are required")
+        if action not in self.ACTIONS:
+            raise ValueError("Unsupported permission action")
+        if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int):
+            raise ValueError("ttl_seconds must be an integer")
+        if ttl_seconds <= 0 or ttl_seconds > 31 * 24 * 60 * 60:
+            raise ValueError("ttl_seconds must be between 1 second and 31 days")
+        now = self._clock()
+        grant = {
+            "grant_id": uuid.uuid4().hex,
+            "subject_id": subject,
+            "resource": resource_key,
+            "action": action,
+            "scope": scope_key,
+            "created_by": actor,
+            "created_at": now,
+            "expires_at": now + ttl_seconds,
+            "revoked_at": None,
+        }
+        with self._lock:
+            self._state["grants"].append(grant)
+            self._save()
+            self._audit(
+                "grant_issued", subject_id=subject, resource=resource_key,
+                action=action, reason="owner_grant", grant_id=grant["grant_id"],
+            )
+        return grant["grant_id"]
+
+    def revoke_grant(self, *, actor_id: str, grant_id: str) -> bool:
+        if str(actor_id).strip() != self.owner_id:
+            raise PermissionDenied("Only the owner may revoke a grant")
+        with self._lock:
+            for grant in self._state["grants"]:
+                if grant.get("grant_id") == str(grant_id) and grant.get("revoked_at") is None:
+                    grant["revoked_at"] = self._clock()
+                    self._save()
+                    self._audit(
+                        "grant_revoked",
+                        subject_id=str(grant.get("subject_id") or ""),
+                        resource=str(grant.get("resource") or ""),
+                        action=str(grant.get("action") or ""),
+                        reason="owner_revocation",
+                        grant_id=str(grant_id),
+                    )
+                    return True
+        return False
+
+    def check(
+        self,
+        *,
+        requester_id: str,
+        resource: str,
+        action: str,
+        scope: str,
+    ) -> bool:
+        subject = str(requester_id).strip()
+        resource_key = str(resource).strip()
+        scope_key = str(scope).strip()
+        if not subject or not resource_key or not scope_key or action not in self.ACTIONS:
+            self._audit(
+                "deny", subject_id=subject, resource=resource_key,
+                action=str(action), reason="invalid_request",
+            )
+            raise PermissionDenied("Invalid or incomplete permission request")
+        now = self._clock()
+        with self._lock:
+            matches = [
+                grant for grant in self._state["grants"]
+                if grant.get("subject_id") == subject
+                and grant.get("resource") == resource_key
+                and grant.get("action") == action
+                and grant.get("scope") == scope_key
+                and grant.get("revoked_at") is None
+                and isinstance(grant.get("expires_at"), (int, float))
+                and now < grant["expires_at"]
+            ]
+            if not matches:
+                self._audit(
+                    "deny", subject_id=subject, resource=resource_key,
+                    action=action, reason="no_active_matching_grant",
+                )
+                raise PermissionDenied(
+                    f"Denied {action} on {resource_key}: no active grant"
+                )
+            selected = max(matches, key=lambda item: float(item["expires_at"]))
+            self._audit(
+                "allow", subject_id=subject, resource=resource_key,
+                action=action, reason="active_grant",
+                grant_id=str(selected["grant_id"]),
+            )
+            return True
+
+    def require(self, **request: Any) -> None:
+        self.check(**request)
+
+    def list_active_grants(self, *, actor_id: str) -> list[dict[str, Any]]:
+        if str(actor_id).strip() != self.owner_id:
+            raise PermissionDenied("Only the owner may inspect grants")
+        now = self._clock()
+        with self._lock:
+            return [
+                dict(grant) for grant in self._state["grants"]
+                if grant.get("revoked_at") is None
+                and isinstance(grant.get("expires_at"), (int, float))
+                and now < grant["expires_at"]
+            ]
+
+
+NEW FRAGMENT END
+
+TESTS:
+
+1. Без grant любой read/write/commit/build/publish/service_management запрещён.
+2. Grant для другого subject/resource/action/scope не подходит.
+3. Истёкший grant немедленно перестаёт действовать.
+4. Отозванный grant немедленно перестаёт действовать.
+5. Не-владелец не может выдать, отозвать или просмотреть grants.
+6. Повреждённый permissions.json приводит к отказу, а не к пустой
+   политике с разрешениями.
+7. Аудит содержит решения и причины, но не содержит содержимого чатов,
+   API-ключей или токенов.
+
+IMPLEMENTATION GATE:
+
+До интеграции этот модуль не должен использоваться как доказательство
+защиты приложения. Следующий патч обязан подключить один экземпляр
+PermissionManager к фактическим точкам чтения/записи/экспорта/восстановления,
+агентским действиям, commit/build/publish и IPC; UI-кнопки не заменяют
+проверки непосредственно перед операцией.
+
+---
+
+PATCH-ID: Q003-B-PERMISSION-MANAGER-TESTS-001
+
+TARGET FILE: tests/test_permission_manager.py
+
+PURPOSE:
+
+Добавить регрессионные тесты default-deny, изоляции grants, срока действия,
+отзыва и аудита Permission Manager.
+
+ORIGINAL FRAGMENT BEGIN
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from permission_manager import PermissionDenied, PermissionManager
+
+
+class PermissionManagerTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.now = [1000.0]
+        self.owner = "owner-local-1"
+        self.manager = PermissionManager(
+            self.temp.name, self.owner, clock=lambda: self.now[0]
+        )
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def grant(self, **overrides):
+        values = {
+            "actor_id": self.owner,
+            "subject_id": "participant-1",
+            "resource": "private-chat:chat-1",
+            "action": "read",
+            "ttl_seconds": 60,
+            "scope": "chat-1",
+        }
+        values.update(overrides)
+        return self.manager.issue_grant(**values)
+
+    def test_owner_identity_is_stable(self):
+        first = PermissionManager.load_or_create_owner_id(self.temp.name)
+        second = PermissionManager.load_or_create_owner_id(self.temp.name)
+        self.assertEqual(first, second)
+        self.assertTrue(first)
+
+    def test_default_deny(self):
+        with self.assertRaises(PermissionDenied):
+            self.manager.require(
+                requester_id="participant-1",
+                resource="private-chat:chat-1",
+                action="read",
+                scope="chat-1",
+            )
+
+    def test_exact_scope_is_required(self):
+        self.grant()
+        with self.assertRaises(PermissionDenied):
+            self.manager.require(
+                requester_id="participant-1",
+                resource="private-chat:chat-1",
+                action="read",
+                scope="chat-2",
+            )
+
+    def test_expired_grant_is_denied(self):
+        self.grant()
+        self.now[0] += 61
+        with self.assertRaises(PermissionDenied):
+            self.manager.require(
+                requester_id="participant-1",
+                resource="private-chat:chat-1",
+                action="read",
+                scope="chat-1",
+            )
+
+    def test_revocation_is_immediate(self):
+        grant_id = self.grant()
+        self.assertTrue(self.manager.revoke_grant(
+            actor_id=self.owner, grant_id=grant_id
+        ))
+        with self.assertRaises(PermissionDenied):
+            self.manager.require(
+                requester_id="participant-1",
+                resource="private-chat:chat-1",
+                action="read",
+                scope="chat-1",
+            )
+
+    def test_non_owner_cannot_issue_or_revoke(self):
+        with self.assertRaises(PermissionDenied):
+            self.grant(actor_id="participant-1")
+        grant_id = self.grant()
+        with self.assertRaises(PermissionDenied):
+            self.manager.revoke_grant(
+                actor_id="participant-1", grant_id=grant_id
+            )
+
+    def test_different_subject_and_action_are_denied(self):
+        self.grant()
+        for subject, action in (("participant-2", "read"), ("participant-1", "write")):
+            with self.assertRaises(PermissionDenied):
+                self.manager.require(
+                    requester_id=subject,
+                    resource="private-chat:chat-1",
+                    action=action,
+                    scope="chat-1",
+                )
+
+    def test_corrupt_store_fails_closed(self):
+        self.manager.path.write_text("{broken", encoding="utf-8")
+        with self.assertRaises(IOError):
+            PermissionManager(self.temp.name, self.owner)
+
+    def test_audit_does_not_store_payload_or_secret(self):
+        self.grant()
+        self.manager.require(
+            requester_id="participant-1",
+            resource="private-chat:chat-1",
+            action="read",
+            scope="chat-1",
+        )
+        audit = self.manager.audit_path.read_text(encoding="utf-8")
+        self.assertNotIn("api_key", audit)
+        self.assertNotIn("private message body", audit)
+        records = [json.loads(line) for line in audit.splitlines()]
+        self.assertTrue(any(item["decision"] == "allow" for item in records))
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+NEW FRAGMENT END
+
+
+
+---
+
+PATCH-ID: Q003-E-SEMANTIC-MEMORY-001
+
+TARGET FILE: semantic_memory.py
+
+PURPOSE:
+
+Создать хранилище производной семантической памяти с происхождением,
+confidence, областями видимости и обнаружением изменений/удалений исходных
+сообщений. Первичная история остаётся неизменной и хранится отдельно.
+
+ORIGINAL FRAGMENT BEGIN
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+"""Provenance-aware semantic memory; raw chat history remains authoritative."""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import time
+import uuid
+from pathlib import Path
+from typing import Any, Iterable
+
+
+class SemanticMemory:
+    SCHEMA = "yj64.semantic-memory.v1"
+    TYPES = frozenset({
+        "fact", "decision", "preference", "hypothesis", "question", "conflict"
+    })
+
+    def __init__(self, user_data_dir: str | Path, *, clock=time.time) -> None:
+        self.path = Path(user_data_dir) / "yj64-workspace" / "semantic-memory.json"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.clock = clock
+        self.state = self._load()
+
+    def _load(self) -> dict[str, Any]:
+        if not self.path.exists():
+            return {"schema": self.SCHEMA, "items": [], "sources": {}}
+        try:
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as exc:
+            raise IOError("Semantic memory is unreadable; refusing to overwrite") from exc
+        if (
+            not isinstance(value, dict)
+            or value.get("schema") != self.SCHEMA
+            or not isinstance(value.get("items"), list)
+            or not isinstance(value.get("sources"), dict)
+        ):
+            raise IOError("Invalid semantic memory schema")
+        return value
+
+    @staticmethod
+    def _digest(message: dict[str, Any]) -> str:
+        payload = json.dumps(message, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _save(self) -> None:
+        temp = self.path.with_name(self.path.name + ".tmp")
+        try:
+            with temp.open("w", encoding="utf-8") as handle:
+                json.dump(self.state, handle, ensure_ascii=False, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, self.path)
+        finally:
+            temp.unlink(missing_ok=True)
+
+    def sync_sources(
+        self,
+        messages: Iterable[dict[str, Any]],
+        *,
+        scope: str,
+        participant_id: str | None = None,
+    ) -> dict[str, list[str]]:
+        scope_key = str(scope).strip()
+        if not scope_key:
+            raise ValueError("scope is required")
+        current: dict[str, str] = {}
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            message_id = str(message.get("message_id") or "").strip()
+            if not message_id:
+                continue
+            current[message_id] = self._digest(message)
+        key = scope_key + ":" + str(participant_id or "common")
+        previous = self.state["sources"].get(key, {})
+        if not isinstance(previous, dict):
+            previous = {}
+        old_ids, new_ids = set(previous), set(current)
+        added = sorted(new_ids - old_ids)
+        changed = sorted(mid for mid in new_ids & old_ids if current[mid] != previous[mid])
+        deleted = sorted(old_ids - new_ids)
+        invalidated = set(changed + deleted)
+        if invalidated:
+            for item in self.state["items"]:
+                sources = set(item.get("source_message_ids") or [])
+                if sources & invalidated:
+                    item["status"] = "stale"
+                    item["stale_reason"] = (
+                        "source_changed" if sources & set(changed) else "source_deleted"
+                    )
+                    item["updated_at"] = self.clock()
+        self.state["sources"][key] = current
+        self._save()
+        return {"added": added, "changed": changed, "deleted": deleted}
+
+    def upsert(
+        self,
+        *,
+        item_type: str,
+        text: str,
+        source_message_ids: list[str],
+        scope: str,
+        participant_id: str | None = None,
+        confidence: float,
+    ) -> str:
+        if item_type not in self.TYPES:
+            raise ValueError("Unsupported semantic memory item type")
+        body = str(text).strip()
+        sources = sorted({str(x).strip() for x in source_message_ids if str(x).strip()})
+        scope_key = str(scope).strip()
+        if not body or not sources or not scope_key:
+            raise ValueError("text, source_message_ids and scope are required")
+        if isinstance(confidence, bool) or not 0.0 <= float(confidence) <= 1.0:
+            raise ValueError("confidence must be between 0 and 1")
+        now = self.clock()
+        item_id = uuid.uuid4().hex
+        record = {
+            "id": item_id,
+            "type": item_type,
+            "text": body,
+            "confidence": float(confidence),
+            "source_message_ids": sources,
+            "participant_id": str(participant_id) if participant_id else None,
+            "scope": scope_key,
+            "created_at": now,
+            "updated_at": now,
+            "status": "active",
+        }
+        self.state["items"].append(record)
+        self._save()
+        return item_id
+
+    def list_items(
+        self, *, scope: str, participant_id: str | None = None,
+        include_stale: bool = False,
+    ) -> list[dict[str, Any]]:
+        result = []
+        for item in self.state["items"]:
+            if item.get("scope") != scope:
+                continue
+            if item.get("participant_id") != participant_id:
+                continue
+            if not include_stale and item.get("status") != "active":
+                continue
+            result.append(dict(item))
+        return result
+
+
+NEW FRAGMENT END
+
+TESTS:
+
+1. Добавление нового message_id фиксируется как added.
+2. Изменение содержимого того же message_id фиксируется как changed.
+3. Удаление ранее известного message_id фиксируется как deleted.
+4. Семантический элемент ссылается на source_message_ids и становится
+   stale при изменении/удалении источника.
+5. Общая и participant-scoped память не смешиваются.
+6. Ошибка чтения повреждённого хранилища не приводит к его перезаписи.
+7. sync_sources не изменяет переданные исходные сообщения.
+
+---
+
+PATCH-ID: Q003-F-CONTEXT-MANAGER-001
+
+TARGET FILE: context_manager.py
+
+PURPOSE:
+
+Реализовать отдельные режимы Memory Only, Memory + Recent и Full History.
+Не смешивать эти режимы с транспортными/API режимами text и agent.
+Не обрезать сообщения молча: при невозможности уложить обязательный слой
+в бюджет возвращать явную ошибку.
+
+ORIGINAL FRAGMENT BEGIN
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+"""Explicit context selection with no silent truncation or mode fallback."""
+from __future__ import annotations
+
+import math
+from typing import Any, Callable, Iterable
+
+
+class ContextBudgetError(ValueError):
+    pass
+
+
+class ContextManager:
+    MODES = frozenset({"memory_only", "memory_recent", "full_history"})
+
+    def __init__(self, token_counter: Callable[[str], int]) -> None:
+        if not callable(token_counter):
+            raise ValueError("A provider-compatible token_counter is required")
+        self.token_counter = token_counter
+
+    def build(
+        self,
+        *,
+        mode: str,
+        token_budget: int,
+        memory_items: Iterable[dict[str, Any]],
+        recent_messages: Iterable[dict[str, Any]],
+        full_history: Iterable[dict[str, Any]],
+        participant_id: str | None,
+        transport_mode: str,
+    ) -> dict[str, Any]:
+        if mode not in self.MODES:
+            raise ValueError("Unknown context mode")
+        if isinstance(token_budget, bool) or not isinstance(token_budget, int) or token_budget <= 0:
+            raise ValueError("token_budget must be a positive integer")
+        if transport_mode not in ("text", "agent"):
+            raise ValueError("Unknown transport/API mode")
+        memories = [
+            dict(item) for item in memory_items
+            if isinstance(item, dict)
+            and item.get("status", "active") == "active"
+            and item.get("participant_id") == participant_id
+        ]
+        recent = [dict(item) for item in recent_messages if isinstance(item, dict)]
+        history = [dict(item) for item in full_history if isinstance(item, dict)]
+
+        memory_layer = [
+            {
+                "role": "system",
+                "content": (
+                    "[SEMANTIC_MEMORY] " + str(item.get("type", "memory"))
+                    + ": " + str(item.get("text", ""))
+                ),
+                "provenance": {
+                    "source": "semantic_memory",
+                    "memory_id": str(item.get("id", "")),
+                    "source_message_ids": list(item.get("source_message_ids") or []),
+                    "scope": item.get("scope"),
+                    "confidence": item.get("confidence"),
+                },
+            }
+            for item in memories
+        ]
+
+        def count(rows: list[dict[str, Any]]) -> int:
+            return sum(
+                max(0, int(self.token_counter(str(row.get("content", "")))))
+                for row in rows
+            )
+
+        if mode == "memory_only":
+            selected = memory_layer
+        elif mode == "full_history":
+            selected = history
+        else:
+            selected = list(memory_layer)
+            used = count(selected)
+            if used > token_budget:
+                raise ContextBudgetError(
+                    "Semantic memory alone exceeds the configured context budget"
+                )
+            selected_recent = []
+            for message in reversed(recent):
+                candidate = selected_recent + [message]
+                if used + count(candidate) > token_budget:
+                    break
+                selected_recent = candidate
+            selected.extend(selected_recent)
+
+        used = count(selected)
+        if used > token_budget:
+            raise ContextBudgetError(
+                f"Selected context requires {used} tokens; budget is {token_budget}"
+            )
+        return {
+            "context_mode": mode,
+            "transport_mode": transport_mode,
+            "participant_id": participant_id,
+            "estimated_or_provider_tokens": used,
+            "token_budget": token_budget,
+            "messages": selected,
+            "provenance": [
+                dict(row.get("provenance") or {"source": "history"})
+                for row in selected
+            ],
+        }
+
+
+NEW FRAGMENT END
+
+TESTS:
+
+1. memory_only включает только active semantic memory.
+2. memory_recent добавляет последние целые сообщения, не разрезая их.
+3. full_history не удаляет и не сокращает сообщения.
+4. Превышение бюджета вызывает ContextBudgetError, без silent truncation.
+5. Неизвестный context mode не переключается автоматически на другой.
+6. transport_mode остаётся отдельным полем и не выбирает context mode.
+7. participant-scoped memory другого участника не попадает в контекст.
+
+IMPLEMENTATION GATE:
+
+Перед production-интеграцией token_counter должен быть привязан к
+реальному tokenizer/лимиту выбранного провайдера. При отсутствии точного
+счётчика запрещено представлять оценку как гарантированный provider limit.
+
+---
+
+PATCH-ID: Q003-D-SYSTEM-CHAT-001
+
+TARGET FILE: system_chat.py
+
+PURPOSE:
+
+Создать отдельное хранилище system instructions и system chat для каждого
+стабильного participant_id. Имя модели или отображаемое имя не является
+идентификатором. Только владелец меняет system instructions.
+
+ORIGINAL FRAGMENT BEGIN
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+"""Owner-managed system instructions and isolated participant system chats."""
+from __future__ import annotations
+
+import json
+import os
+import re
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+
+class SystemChatAccessDenied(PermissionError):
+    pass
+
+
+class SystemChatStore:
+    SCHEMA = "yj64.system-chat.v1"
+
+    def __init__(self, user_data_dir: str | Path, owner_id: str) -> None:
+        self.root = Path(user_data_dir) / "yj64-workspace" / "system-chats"
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.owner_id = str(owner_id).strip()
+        if not self.owner_id:
+            raise ValueError("owner_id is required")
+
+    @staticmethod
+    def _safe_id(value: str) -> str:
+        safe = re.sub(r"[^A-Za-z0-9_-]", "", str(value))
+        if not safe:
+            raise ValueError("Invalid participant_id")
+        return safe
+
+    def _path(self, participant_id: str) -> Path:
+        return self.root / (self._safe_id(participant_id) + ".json")
+
+    def _read(self, participant_id: str) -> dict[str, Any]:
+        path = self._path(participant_id)
+        if not path.exists():
+            return {
+                "schema": self.SCHEMA,
+                "participant_id": self._safe_id(participant_id),
+                "system_instructions": "",
+                "messages": [],
+            }
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as exc:
+            raise IOError("System chat is unreadable; refusing to overwrite") from exc
+        if (
+            not isinstance(value, dict)
+            or value.get("schema") != self.SCHEMA
+            or value.get("participant_id") != self._safe_id(participant_id)
+            or not isinstance(value.get("messages"), list)
+            or not isinstance(value.get("system_instructions"), str)
+        ):
+            raise IOError("Invalid system chat schema")
+        return value
+
+    def _write(self, participant_id: str, value: dict[str, Any]) -> None:
+        path = self._path(participant_id)
+        temp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+        try:
+            with temp.open("w", encoding="utf-8") as handle:
+                json.dump(value, handle, ensure_ascii=False, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, path)
+        finally:
+            temp.unlink(missing_ok=True)
+
+    def set_system_instructions(
+        self, *, actor_id: str, participant_id: str, instructions: str
+    ) -> None:
+        if str(actor_id).strip() != self.owner_id:
+            raise SystemChatAccessDenied("Only the owner may edit system instructions")
+        data = self._read(participant_id)
+        data["system_instructions"] = str(instructions)
+        data["instructions_updated_at"] = time.time()
+        self._write(participant_id, data)
+
+    def append_message(
+        self, *, actor_id: str, participant_id: str, role: str, content: str
+    ) -> None:
+        actor = str(actor_id).strip()
+        pid = self._safe_id(participant_id)
+        if actor not in (self.owner_id, pid):
+            raise SystemChatAccessDenied("Actor cannot write another participant's system chat")
+        if role not in ("user", "assistant", "system"):
+            raise ValueError("Unsupported system-chat role")
+        if role == "system" and actor != self.owner_id:
+            raise SystemChatAccessDenied("Only the owner may append a system message")
+        data = self._read(pid)
+        data["messages"].append({
+            "message_id": uuid.uuid4().hex,
+            "actor_id": actor,
+            "role": role,
+            "content": str(content),
+            "timestamp_ms": int(time.time() * 1000),
+        })
+        self._write(pid, data)
+
+    def load_for_participant(
+        self, *, actor_id: str, participant_id: str
+    ) -> dict[str, Any]:
+        actor = str(actor_id).strip()
+        pid = self._safe_id(participant_id)
+        if actor not in (self.owner_id, pid):
+            raise SystemChatAccessDenied("Actor cannot read another participant's system chat")
+        data = self._read(pid)
+        return {
+            "participant_id": pid,
+            "system_instructions": data["system_instructions"],
+            "messages": [dict(item) for item in data["messages"]],
+            "provenance": {
+                "instructions_source": "owner",
+                "chat_source": "participant_system_chat",
+                "participant_id": pid,
+            },
+        }
+
+
+NEW FRAGMENT END
+
+TESTS:
+
+1. Participant 1 не читает и не изменяет system chat Participant 2.
+2. Participant не может менять system instructions.
+3. Владелец может менять инструкции отдельно для каждого participant_id.
+4. История system chat Participant 1 не смешивается с Participant 2.
+5. Повреждённый JSON не перезаписывается пустым содержимым.
+6. Повторное открытие после перезапуска сохраняет инструкции и сообщения.
+
+IMPLEMENTATION GATE:
+
+Владелец должен быть аутентифицирован приложением, а participant_id должен
+быть взят из доверенной конфигурации маршрутизатора, а не из текста модели.
+Эти классы должны быть подключены к реальному построению запросов; простое
+наличие отдельных файлов не является выполнением Q-003-C/D/E/F.
+
+
+
+---
+
+PATCH-ID: Q003-I-CI-TEST-GATES-001
+
+TARGET FILE: .github/workflows/ci.yml
+
+PURPOSE:
+
+Расширить CI для Q-003: компиляция новых модулей, запуск unit tests,
+проверка приватности/контекста/разрешений. Проверка должна запускаться
+при изменении соответствующих исходников и тестов как в push, так и PR.
+
+ORIGINAL FRAGMENT BEGIN
+
+  push:
+    branches: ['main']
+    paths:
+      - 'PROTECTED-LINE-GUARD'
+      - 'main.py'
+      - 'chat_workspace.py'
+      - 'yj64_persistent_core.py'
+      - 'buildozer.spec'
+      - 'llm_api.py'
+      - 'llm_settings.py'
+      - 'message_distributor.py'
+      - '.github/workflows/ci.yml'
+      - 'tools/verify_guard.py'
+  pull_request:
+    branches: ['main']
+    paths:
+      - 'PROTECTED-LINE-GUARD'
+      - 'main.py'
+      - 'llm_api.py'
+      - 'llm_settings.py'
+      - 'message_distributor.py'
+      - '.github/workflows/ci.yml'
+      - 'tools/verify_guard.py'
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+  push:
+    branches: ['main']
+    paths:
+      - 'PROTECTED-LINE-GUARD'
+      - 'main.py'
+      - 'chat_workspace.py'
+      - 'yj64_persistent_core.py'
+      - 'permission_manager.py'
+      - 'semantic_memory.py'
+      - 'context_manager.py'
+      - 'system_chat.py'
+      - 'tests/**'
+      - 'buildozer.spec'
+      - 'llm_api.py'
+      - 'llm_settings.py'
+      - 'message_distributor.py'
+      - 'services/**'
+      - '.github/workflows/ci.yml'
+      - 'tools/verify_guard.py'
+  pull_request:
+    branches: ['main']
+    paths:
+      - 'PROTECTED-LINE-GUARD'
+      - 'main.py'
+      - 'chat_workspace.py'
+      - 'yj64_persistent_core.py'
+      - 'permission_manager.py'
+      - 'semantic_memory.py'
+      - 'context_manager.py'
+      - 'system_chat.py'
+      - 'tests/**'
+      - 'llm_api.py'
+      - 'llm_settings.py'
+      - 'message_distributor.py'
+      - 'services/**'
+      - '.github/workflows/ci.yml'
+      - 'tools/verify_guard.py'
+
+NEW FRAGMENT END
+
+TESTS:
+
+1. CI запускается при изменении любого Q-003 модуля, теста или Guard.
+2. Проверка охватывает исходники и тесты в push и pull_request.
+
+---
+
+PATCH-ID: Q003-I-CI-TEST-COMMAND-001
+
+TARGET FILE: .github/workflows/ci.yml
+
+PURPOSE:
+
+Добавить компиляцию всех новых модулей и обязательный запуск unittest.
+
+ORIGINAL FRAGMENT BEGIN
+
+      - name: Compile protected Python modules
+        run: |
+          python3 -m py_compile main.py chat_workspace.py yj64_persistent_core.py llm_api.py llm_settings.py message_distributor.py tools/verify_guard.py
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+      - name: Compile protected Python modules
+        run: |
+          python3 -m py_compile main.py chat_workspace.py yj64_persistent_core.py permission_manager.py semantic_memory.py context_manager.py system_chat.py llm_api.py llm_settings.py message_distributor.py tools/verify_guard.py
+      - name: Run Q-003 unit tests
+        run: |
+          python3 -m unittest discover -s tests -v
+
+NEW FRAGMENT END
+
+TESTS:
+
+1. py_compile проверяет все новые модули.
+2. unittest discovery запускает тесты и возвращает ненулевой код при ошибке.
+3. Functional tests являются обязательным gate перед ручным Android Build.
+
+---
+
+PATCH-ID: Q003-I-MANUAL-ANDROID-BUILD-001
+
+TARGET FILE: .github/workflows/android-apk.yml
+
+PURPOSE:
+
+Убрать автоматический Android Build от каждого изменения Guard.
+Guard и рабочие исходники должны пройти CI и тесты; APK запускается только
+отдельным workflow_dispatch после проверки commit и version bump.
+
+ORIGINAL FRAGMENT BEGIN
+
+on:
+  push:
+    branches: ['main']
+    paths:
+      - 'PROTECTED-LINE-GUARD'
+  workflow_dispatch:
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+on:
+  workflow_dispatch:
+
+NEW FRAGMENT END
+
+TESTS:
+
+1. Push изменения Guard больше не запускает Android Build автоматически.
+2. Workflow остаётся доступен вручную через workflow_dispatch.
+3. Перед ручным запуском проверяется commit SHA, versionCode/versionName
+   и успешный CI на том же commit.
+4. В сборку не допускается commit, содержащий только изменения Guard.
+
+
+
+---
+
+PATCH-ID: Q003-B-C-D-E-MODULE-BOOTSTRAP-001
+
+TARGET FILE: main.py
+
+PURPOSE:
+
+Инициализировать единые локальные хранилища Q-003 в Base App после
+создания PersistentCore. owner_id создаётся один раз и далее читается
+из стабильного owner-identity.json. Participant identity далее связывается
+с доверенным route_id, а не с отображаемым именем.
+
+ORIGINAL FRAGMENT BEGIN
+
+        self.report_path = Path(self.user_data_dir) / REPORT_RELATIVE_PATH
+        from yj64_persistent_core import PersistentCore
+        self.persistent_core = PersistentCore(self.user_data_dir)
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+        self.report_path = Path(self.user_data_dir) / REPORT_RELATIVE_PATH
+        from yj64_persistent_core import PersistentCore
+        self.persistent_core = PersistentCore(self.user_data_dir)
+        from permission_manager import PermissionManager
+        self.owner_id = PermissionManager.load_or_create_owner_id(self.user_data_dir)
+        self.permission_manager = PermissionManager(self.user_data_dir, self.owner_id)
+        from semantic_memory import SemanticMemory
+        self.semantic_memory = SemanticMemory(self.user_data_dir)
+        from system_chat import SystemChatStore
+        self.system_chat_store = SystemChatStore(self.user_data_dir, self.owner_id)
+        from context_manager import ContextManager
+        self.context_manager = ContextManager()
+
+NEW FRAGMENT END
+
+TESTS:
+
+1. Первый запуск создаёт owner-identity.json со стабильным UUID.
+2. Повторный запуск сохраняет тот же owner_id.
+3. Ошибка чтения identity не создаёт новую личность и не перезаписывает файл.
+4. Все хранилища инициализируются в одном app-private workspace.
+5. Отображаемые названия Participant 1/2 не используются как security identity.
+
+IMPLEMENTATION GATE:
+
+Это только bootstrap. Следующие патчи обязаны добавить реальные проверки
+PermissionManager перед каждой защищённой операцией и подключить
+SystemChatStore/SemanticMemory к фактическим запросам. Инициализация
+объектов не является доказательством завершения Q-003.
 

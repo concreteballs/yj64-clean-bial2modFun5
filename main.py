@@ -233,6 +233,15 @@ class YJ64BaseApp(App):
         self.report_path = Path(self.user_data_dir) / REPORT_RELATIVE_PATH
         from yj64_persistent_core import PersistentCore
         self.persistent_core = PersistentCore(self.user_data_dir)
+        from permission_manager import PermissionManager
+        self.owner_id = PermissionManager.load_or_create_owner_id(self.user_data_dir)
+        self.permission_manager = PermissionManager(self.user_data_dir, self.owner_id)
+        from semantic_memory import SemanticMemory
+        self.semantic_memory = SemanticMemory(self.user_data_dir)
+        from system_chat import SystemChatStore
+        self.system_chat_store = SystemChatStore(self.user_data_dir, self.owner_id)
+        from context_manager import ContextManager
+        self.context_manager = ContextManager(self.permission_manager, self.owner_id)
         self._previous_excepthook = sys.excepthook
         sys.excepthook = self._handle_uncaught_exception
         self._previous_thread_excepthook = getattr(threading, "excepthook", None)
@@ -503,6 +512,13 @@ class YJ64BaseApp(App):
         uri = None
         try:
             self._save_common_history()
+            # Собрать private chat records из histories/*.json и sidecar metadata.
+            # Неизвестные/неполные записи исключить из обоих типов экспорта.
+            # requester_id получить из стабильного локального owner identity.
+            # Для каждой записи проверить classify_chat и check_private_access.
+            # Создать отдельный временный ZIP на каждый разрешённый chat_id.
+            # Каждый личный ZIP опубликовать отдельной записью MediaStore
+            # в Download/YJ-64 и проверить readback так же, как общий ZIP.
             self.persistent_core.export_archive(temp_path)
             from jnius import autoclass
             PythonActivity = autoclass("org.kivy.android.PythonActivity")
@@ -1902,9 +1918,51 @@ class YJ64BaseApp(App):
             model=status["model"],
         )
 
-        history = self.private_histories.setdefault(
-            participant_name, self.workspace.load_named_history(participant_name)
+        private_chat_id = hashlib.sha256(
+            f"yj64-private-chat:{self.owner_id}:{route_id}".encode("utf-8")
+        ).hexdigest()[:32]
+        metadata = self.workspace.load_private_chat_metadata(participant_name)
+        metadata_path = self.workspace._private_metadata_path(participant_name)
+        if metadata is None:
+            if metadata_path.exists():
+                raise IOError("Private chat metadata is invalid; refusing access")
+            self.workspace.save_private_chat_metadata(
+                participant_name,
+                chat_id=private_chat_id,
+                owner_id=self.owner_id,
+                user_id=self.owner_id,
+            )
+            metadata = self.workspace.load_private_chat_metadata(participant_name)
+        if (
+            metadata is None
+            or metadata.get("owner_id") != self.owner_id
+            or metadata.get("user_id") != self.owner_id
+            or not metadata.get("chat_id")
+        ):
+            raise PermissionError("Private chat identity does not match this owner")
+        private_chat_id = str(metadata["chat_id"])
+        read_grant = self.permission_manager.issue_grant(
+            actor_id=self.owner_id,
+            subject_id=self.owner_id,
+            resource="private-chat:" + private_chat_id,
+            action="read",
+            ttl_seconds=120,
+            scope=private_chat_id,
         )
+        try:
+            self.permission_manager.require(
+                requester_id=self.owner_id,
+                resource="private-chat:" + private_chat_id,
+                action="read",
+                scope=private_chat_id,
+            )
+            history = self.private_histories.setdefault(
+                participant_name, self.workspace.load_named_history(participant_name)
+            )
+        finally:
+            self.permission_manager.revoke_grant(
+                actor_id=self.owner_id, grant_id=read_grant
+            )
         output_lines = [
             f"{'You' if item.get('role') == 'user' else participant_name}:\n{item.get('content', '')}"
             for item in history
@@ -1983,9 +2041,42 @@ class YJ64BaseApp(App):
             output.text += f"\n\nYou: {message}\n\nSending privately..."
             private_context = list(self.private_histories.get(participant_name, []))
             request_message = self._practical_instructions(message)
-            request_history = private_context + [
-                {"role": "user", "content": request_message}
-            ]
+            request_grant = None
+            try:
+                request_grant = self.permission_manager.issue_grant(
+                    actor_id=self.owner_id,
+                    subject_id=self.owner_id,
+                    resource="private-chat:" + private_chat_id,
+                    action="read",
+                    ttl_seconds=120,
+                    scope=private_chat_id,
+                )
+                request_context = self.context_manager.build(
+                    route_id=route_id,
+                    mode="full_history",
+                    scope="private",
+                    requester_id=self.owner_id,
+                    chat_id=private_chat_id,
+                    private_history=private_context + [
+                        {"role": "user", "content": request_message}
+                    ],
+                )
+                request_history = request_context["messages"]
+            except Exception as exc:
+                send.disabled = False
+                output.text += f"\\n\\nPRIVATE ACCESS DENIED: {type(exc).__name__}: {exc}"
+                self._append_report(
+                    "participant_private_context_denied",
+                    participant=participant_name,
+                    route_id=route_id,
+                    error_type=type(exc).__name__,
+                )
+                return
+            finally:
+                if request_grant:
+                    self.permission_manager.revoke_grant(
+                        actor_id=self.owner_id, grant_id=request_grant
+                    )
             self._append_report(
                 "participant_request_started",
                 participant=participant_name,
@@ -2055,10 +2146,47 @@ class YJ64BaseApp(App):
                             {"role": "user", "content": message},
                             {"role": "assistant", "content": text_value},
                         ]
-                        self.private_histories.setdefault(participant_name, []).extend(exchange)
-                        self.workspace.save_named_history(
-                            participant_name, self.private_histories[participant_name]
-                        )
+                        updated_private_history = list(
+                            self.private_histories.get(participant_name, [])
+                        ) + exchange
+                        write_grant = None
+                        try:
+                            write_grant = self.permission_manager.issue_grant(
+                                actor_id=self.owner_id,
+                                subject_id=self.owner_id,
+                                resource="private-chat:" + private_chat_id,
+                                action="write",
+                                ttl_seconds=120,
+                                scope=private_chat_id,
+                            )
+                            self.permission_manager.require(
+                                requester_id=self.owner_id,
+                                resource="private-chat:" + private_chat_id,
+                                action="write",
+                                scope=private_chat_id,
+                            )
+                            self.workspace.save_named_history(
+                                participant_name, updated_private_history
+                            )
+                            self.private_histories[participant_name] = updated_private_history
+                        except Exception as exc:
+                            output.text += (
+                                f"\\n\\nPRIVATE HISTORY SAVE DENIED: "
+                                f"{type(exc).__name__}: {exc}"
+                            )
+                            self._append_report(
+                                "participant_private_history_write_denied",
+                                participant=participant_name,
+                                route_id=route_id,
+                                error_type=type(exc).__name__,
+                            )
+                            send.disabled = False
+                            return
+                        finally:
+                            if write_grant:
+                                self.permission_manager.revoke_grant(
+                                    actor_id=self.owner_id, grant_id=write_grant
+                                )
                         last_exchange["messages"] = exchange
                         last_exchange["published"] = False
                         history_text = "\n\n".join(
