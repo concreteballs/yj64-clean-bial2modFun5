@@ -3436,6 +3436,131 @@ ACCEPTANCE:
 
 ---
 
+
+PATCH-ID: Q003-H-SKILLS-READ-WRITE-GATE-006
+
+TARGET FILE: main.py
+PATCH STATUS: EXACT SOURCE CAPTURED — GUARD ONLY; NOT TRANSFERRED
+
+PURPOSE:
+Защитить чтение и изменение локального файла YJ-64 local skills.
+Разрешения выдаются только на время явного открытия редактора и явного
+нажатия SAVE SKILLS; при ошибке операция завершается отказом.
+
+ORIGINAL FRAGMENT BEGIN
+    def _open_skills_editor(self, *_: Any) -> None:
+        content = BoxLayout(orientation="vertical", spacing=8, padding=10)
+        editor = TextInput(text=self.workspace.read_skills(), multiline=True)
+        content.add_widget(editor)
+        status = Label(text=f"Stored locally: {self.workspace.skills_path}", size_hint_y=None, height=44)
+        content.add_widget(status)
+        buttons = BoxLayout(size_hint_y=None, height=52, spacing=8)
+        save = FeedbackButton(text="SAVE SKILLS")
+        close = FeedbackButton(text="CLOSE")
+        buttons.add_widget(save)
+        buttons.add_widget(close)
+        content.add_widget(buttons)
+        popup = Popup(title="LOCAL SKILLS FILE", content=content, size_hint=(0.96, 0.9))
+        def save_skills(*_args: Any) -> None:
+            self.workspace.write_skills(editor.text)
+            self._append_report("skills_file_saved", character_count=len(editor.text))
+            status.text = "Saved locally. Instructions are added to future chat prompts."
+        save.bind(on_release=save_skills)
+        close.bind(on_release=lambda *_: popup.dismiss())
+        popup.open()
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+    def _open_skills_editor(self, *_: Any) -> None:
+        content = BoxLayout(orientation="vertical", spacing=8, padding=10)
+        read_grant = None
+        try:
+            read_grant = self.permission_manager.issue_grant(
+                actor_id=self.owner_id,
+                subject_id=self.owner_id,
+                resource="local-skills",
+                action="read",
+                ttl_seconds=120,
+                scope="owner",
+            )
+            self.permission_manager.require(
+                requester_id=self.owner_id,
+                resource="local-skills",
+                action="read",
+                scope="owner",
+            )
+            skills_text = self.workspace.read_skills()
+        except Exception as exc:
+            self._append_report(
+                "skills_file_read_denied",
+                error_type=type(exc).__name__,
+            )
+            self.status.text = f"Skills access denied: {type(exc).__name__}"
+            return
+        finally:
+            if read_grant:
+                self.permission_manager.revoke_grant(
+                    actor_id=self.owner_id, grant_id=read_grant
+                )
+        editor = TextInput(text=skills_text, multiline=True)
+        content.add_widget(editor)
+        status = Label(text=f"Stored locally: {self.workspace.skills_path}", size_hint_y=None, height=44)
+        content.add_widget(status)
+        buttons = BoxLayout(size_hint_y=None, height=52, spacing=8)
+        save = FeedbackButton(text="SAVE SKILLS")
+        close = FeedbackButton(text="CLOSE")
+        buttons.add_widget(save)
+        buttons.add_widget(close)
+        content.add_widget(buttons)
+        popup = Popup(title="LOCAL SKILLS FILE", content=content, size_hint=(0.96, 0.9))
+        def save_skills(*_args: Any) -> None:
+            write_grant = None
+            try:
+                write_grant = self.permission_manager.issue_grant(
+                    actor_id=self.owner_id,
+                    subject_id=self.owner_id,
+                    resource="local-skills",
+                    action="write",
+                    ttl_seconds=120,
+                    scope="owner",
+                )
+                self.permission_manager.require(
+                    requester_id=self.owner_id,
+                    resource="local-skills",
+                    action="write",
+                    scope="owner",
+                )
+                self.workspace.write_skills(editor.text)
+                self._append_report("skills_file_saved", character_count=len(editor.text))
+                status.text = "Saved locally. Instructions are added to future chat prompts."
+            except Exception as exc:
+                self._append_report(
+                    "skills_file_write_denied",
+                    error_type=type(exc).__name__,
+                )
+                status.text = f"Skills save denied: {type(exc).__name__}"
+            finally:
+                if write_grant:
+                    self.permission_manager.revoke_grant(
+                        actor_id=self.owner_id, grant_id=write_grant
+                    )
+        save.bind(on_release=save_skills)
+        close.bind(on_release=lambda *_: popup.dismiss())
+        popup.open()
+NEW FRAGMENT END
+
+ACCEPTANCE:
+- read grant проверяется до workspace.read_skills().
+- write grant проверяется до workspace.write_skills().
+- resource/action/scope точные: local-skills / read|write / owner.
+- grants отзываются в finally.
+- при отказе файл не изменяется; audit report содержит только тип ошибки,
+  а не текст локальных skills.
+- переносить в main.py только после отдельной проверки exact-match и SHA.
+
+---
+
+
 РАЗДЕЛ 5. КОНЕЦ ОПЕРАЦИОННОГО СТОЛА
 
 Перед переносом каждого патча:
