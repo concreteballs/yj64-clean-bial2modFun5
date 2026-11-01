@@ -114,6 +114,9 @@ class ChatWorkspace:
         key = "".join(c for c in str(name) if c.isalnum() or c in "-_ ").strip().replace(" ", "_")
         return self.histories_dir / ((key or "participant") + ".json")
 
+    def _private_metadata_path(self, name: str) -> Path:
+        return self.histories_dir / (self._history_path(name).stem + ".meta.json")
+
     def load_named_history(self, name: str) -> list[dict[str, Any]]:
         data = self._read_json(self._history_path(name), [])
         if not isinstance(data, list):
@@ -125,6 +128,31 @@ class ChatWorkspace:
 
     def save_named_history(self, name: str, history: list[dict[str, Any]]) -> None:
         self._write_json(self._history_path(name), [self._normalize_message(x) for x in history if isinstance(x, dict)])
+
+    def load_private_chat_metadata(self, name: str) -> dict[str, Any] | None:
+        data = self._read_json(self._private_metadata_path(name), None)
+        if not isinstance(data, dict):
+            return None
+        required = ("chat_id", "visibility", "chat_type", "owner_id", "user_id")
+        if any(not str(data.get(key) or "").strip() for key in required):
+            return None
+        if data.get("visibility") != "private" or data.get("chat_type") != "personal":
+            return None
+        return data
+
+    def save_private_chat_metadata(
+        self, name: str, *, chat_id: str, owner_id: str, user_id: str
+    ) -> None:
+        values = {
+            "chat_id": str(chat_id),
+            "visibility": "private",
+            "chat_type": "personal",
+            "owner_id": str(owner_id),
+            "user_id": str(user_id),
+        }
+        if any(not values[key].strip() for key in ("chat_id", "owner_id", "user_id")):
+            raise ValueError("Private chat identity fields must not be empty")
+        self._write_json(self._private_metadata_path(name), values)
 
     def read_skills(self) -> str:
         try:
