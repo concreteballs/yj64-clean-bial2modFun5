@@ -1043,6 +1043,152 @@ ACCEPTANCE:
 
 ---
 
+ЗАКРЫТИЕ ОПЕРАЦИОННОГО СТОЛА — РЕЕСТР ГОТОВНОСТИ И ТОЧНЫЕ ЯКОРЯ
+
+Этот реестр имеет приоритет при решении, разрешено ли переносить patch.
+Наличие PATCH-ID само по себе НЕ означает готовность к переносу.
+Статусы:
+- SPECIFIED: требования определены, но код не готов к переносу.
+- DRAFT: NEW FRAGMENT существует, но не прошёл все проверки.
+- READY-FOR-REVIEW: исходный фрагмент найден ровно один раз, новый код
+  исполняемый, зависимости и тесты определены; перенос всё ещё требует
+  выполнения Guard и проверки тестами.
+- BLOCKED: отсутствует необходимый источник/решение/проверка.
+
+ТЕКУЩИЕ СТАТУСЫ ПАТЧЕЙ
+
+1. YJ64-PRIVATE-CHAT-ARCHIVE-001 — DRAFT.
+   Новый фрагмент метаданных не реализует owner authorization при чтении
+   и записи. Не переносить отдельно от OWNER-IDENTITY-001.
+2. YJ64-PRIVATE-CHAT-ARCHIVE-002 — DRAFT.
+   Фильтр histories/ является только частью общего ZIP exclusion.
+   Перед переносом проверить фактический путь workspace_path и все
+   дополнительные источники файлов в _collect_files().
+3. YJ64-PRIVATE-CHAT-ARCHIVE-003 — SPECIFIED.
+   Комментарии в NEW FRAGMENT являются описанием алгоритма, не кодом.
+   Перенос запрещён до реализации и тестирования.
+4. YJ64-PRIVATE-CHAT-MAIN-IDENTITY-001 — BLOCKED.
+   Нельзя добавлять self.owner_id, пока OWNER-IDENTITY-001 не определил
+   поддерживаемый Android identity API и fail-closed поведение.
+5. YJ64-PRIVATE-CHAT-MAIN-OPEN-001 — BLOCKED.
+   Вызовы ensure_private_chat_metadata/load_named_history должны быть
+   согласованы с реальными сигнатурами и семантикой user_id.
+6. YJ64-PRIVATE-CHAT-MAIN-SAVE-001 — BLOCKED.
+   Запись должна быть закрыта тем же Permission Manager, что и чтение.
+7. YJ64-PRIVATE-CHAT-MAIN-EXPORT-001 — DRAFT.
+   Вызов экспортёра допустим только после проверки реального пути
+   автоматического экспорта и обработки частичных ошибок.
+8. YJ64-PRIVATE-CHAT-MAIN-PUBLISH-001 — DRAFT.
+   Проверить существующий MediaStore helper и Java/PyJNI API.
+   Не дублировать helper, если он уже существует. Убедиться, что
+   запись выполняется потоково без цикла Python на каждый байт,
+   проверяется readback и удаляется незавершённая MediaStore запись.
+9. YJ64-PRIVATE-CHAT-REQUEST-001 — DRAFT.
+   Удаление common_context из private request требует отдельного
+   подтверждения продуктовой семантики: не добавлять общий контекст
+   скрытно. Явная публикация выбранного обмена остаётся отдельным действием.
+10. YJ64-MISTRAL-INPUT-NORMALIZE-001 — DRAFT.
+    Не подменять пустой/полностью отфильтрованный history исходным prompt
+    без проверки вызывающего кода. Не терять system message и не менять
+    формат payload других провайдеров.
+11. YJ64-TRANSIENT-503-RETRY-001 — DRAFT.
+    Retry должен быть ровно один для 503, сохранять отдельную политику
+    429 и не повторять запросы с неидемпотентными побочными действиями
+    без проверки operation semantics.
+12. YJ64-PRIVATE-CHAT-ACCEPTANCE-001 — SPECIFIED.
+    Новый файл отсутствует в исходной ветке. Перед созданием подтвердить,
+    что файл всё ещё отсутствует. Тестировать реальные методы.
+13. YJ64-PRIVATE-CHAT-CI-001 — DRAFT.
+    Текущий workflow запускается только на main и не включает тесты.
+    Новый вариант обязан запускаться на push рабочей ветки и PR, при этом
+    Guard verification должен оставаться первым проверочным шагом.
+14. YJ64-PRIVATE-CHAT-OWNER-IDENTITY-001 — SPECIFIED.
+    Точный insertion anchor ниже. Не использовать app-private random UUID
+    как устойчивую идентичность после очистки данных.
+15. YJ64-PRIVATE-CHAT-RESTORE-001 — SPECIFIED.
+    Точный insertion anchor ниже. Restore не должен распаковывать ZIP
+    непосредственно в рабочую директорию.
+
+ТОЧНЫЕ INSERTION ANCHORS ДЛЯ ПАТЧЕЙ БЕЗ REPLACEMENT-ФРАГМЕНТА
+
+PATCH: YJ64-PRIVATE-CHAT-OWNER-IDENTITY-001
+TARGET FILE: chat_workspace.py
+INSERT BEFORE — ORIGINAL FRAGMENT BEGIN
+
+    def _history_path(self, name: str) -> Path:
+        key = "".join(c for c in str(name) if c.isalnum() or c in "-_ ").strip().replace(" ", "_")
+        return self.histories_dir / ((key or "participant") + ".json")
+
+INSERT BEFORE — ORIGINAL FRAGMENT END
+
+Вставляемый код должен предоставлять явное состояние identity:
+available / unavailable. Android ID допустим только после проверки
+его платформенной стабильности и privacy implications. Если источник
+недоступен, private read/write/export/restore должны завершаться отказом.
+Никакой fallback на новый случайный owner при чтении существующих данных.
+Тесты обязаны имитировать недоступный Android API.
+
+PATCH: YJ64-PRIVATE-CHAT-RESTORE-001
+TARGET FILE: yj64_persistent_core.py
+INSERT BEFORE — ORIGINAL FRAGMENT BEGIN
+
+    def export_archive(self,destination:str|Path)->Path:
+
+INSERT BEFORE — ORIGINAL FRAGMENT END
+
+Вставляемый метод restore_private_chat_archive обязан быть самостоятельным
+методом класса PersistentCore. Перед записью он валидирует весь ZIP,
+manifest, digest, owner access, entry names и дубликаты. Распаковка
+только в новую временную директорию; commit в workspace атомарный.
+При существующем chat_id запрещать overwrite по умолчанию. Никакой
+private data не переносить в common chats.
+
+ОБЯЗАТЕЛЬНЫЕ ТОЧНЫЕ ПРОВЕРКИ ПЕРЕД ПЕРЕНОСОМ ЛЮБОГО PATCH
+
+1. Получить актуальный файл именно из этой ветки, не из main и не из
+   другой ветки/локальной копии.
+2. ORIGINAL FRAGMENT / INSERTION ANCHOR должен встретиться ровно один раз.
+   Для нового файла должно быть явно указано ABSENT и подтверждено
+   деревом Git текущего commit.
+3. Сохранить исходный текст побайтно; не нормализовать окончания строк,
+   отступы, пробелы или кодировку.
+4. Проверить, что NEW FRAGMENT синтаксически корректен и согласован
+   с текущими импортами, типами, сигнатурами и Android API.
+5. Проверить, что соседние call sites не требуют одновременной миграции.
+6. Проверить, что тесты проверяют фактическое поведение, включая
+   deny cases и отсутствие утечки, а не только наличие методов.
+7. Сформировать diff и доказать, что он ограничен разрешёнными участками.
+8. Обновить SHA только для файлов, действительно изменённых патчем.
+9. Запустить tools/verify_guard.py и требуемые unit tests.
+10. Не запускать Android Build автоматически. Build — отдельное решение
+    после успешного Guard, тестов и review.
+
+ГРАНИЦЫ ЭТОЙ ВЕТКИ
+
+Ветка work/guard-operational-table-2026-11-01 является рабочей копией
+для подготовки и завершения Guard. В рамках завершения операционного
+стола разрешено менять только PROTECTED-LINE-GUARD.
+main.py, chat_workspace.py, yj64_persistent_core.py, llm_api.py,
+buildozer.spec и workflow не изменять до отдельного этапа переноса.
+Исходная ветка work/private-chat-isolation-2026-11-01 остаётся
+контрольной точкой и не изменяется.
+
+КРИТЕРИЙ ЗАВЕРШЕНИЯ ОПЕРАЦИОННОГО СТОЛА
+
+Операционный стол считается завершённым как план работ, когда:
+- каждый patch имеет уникальный ID и TARGET FILE;
+- каждый replacement patch содержит точный ORIGINAL FRAGMENT;
+- каждый insertion patch содержит точный уникальный INSERTION ANCHOR;
+- новые файлы явно помечены ABSENT;
+- все зависимости и порядок переноса указаны;
+- для каждого этапа определены deny cases и acceptance tests;
+- ни один комментарий или псевдокод не выдаётся за исполняемый NEW FRAGMENT;
+- неготовые patch помечены SPECIFIED/DRAFT/BLOCKED и не переносятся.
+
+Завершение таблицы НЕ означает, что реализация приложения выполнена,
+что патчи готовы к немедленному применению или что Android Build прошёл.
+
+
 СТАТУС ПОДГОТОВКИ ЭТАПА Q003-A:
 
 1. YJ64-PRIVATE-CHAT-ARCHIVE-001 — спецификация метаданных есть;
