@@ -512,6 +512,13 @@ class YJ64BaseApp(App):
         uri = None
         try:
             self._save_common_history()
+            # Собрать private chat records из histories/*.json и sidecar metadata.
+            # Неизвестные/неполные записи исключить из обоих типов экспорта.
+            # requester_id получить из стабильного локального owner identity.
+            # Для каждой записи проверить classify_chat и check_private_access.
+            # Создать отдельный временный ZIP на каждый разрешённый chat_id.
+            # Каждый личный ZIP опубликовать отдельной записью MediaStore
+            # в Download/YJ-64 и проверить readback так же, как общий ZIP.
             self.persistent_core.export_archive(temp_path)
             from jnius import autoclass
             PythonActivity = autoclass("org.kivy.android.PythonActivity")
