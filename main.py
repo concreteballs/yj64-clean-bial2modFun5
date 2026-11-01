@@ -2146,10 +2146,47 @@ class YJ64BaseApp(App):
                             {"role": "user", "content": message},
                             {"role": "assistant", "content": text_value},
                         ]
-                        self.private_histories.setdefault(participant_name, []).extend(exchange)
-                        self.workspace.save_named_history(
-                            participant_name, self.private_histories[participant_name]
-                        )
+                        updated_private_history = list(
+                            self.private_histories.get(participant_name, [])
+                        ) + exchange
+                        write_grant = None
+                        try:
+                            write_grant = self.permission_manager.issue_grant(
+                                actor_id=self.owner_id,
+                                subject_id=self.owner_id,
+                                resource="private-chat:" + private_chat_id,
+                                action="write",
+                                ttl_seconds=120,
+                                scope=private_chat_id,
+                            )
+                            self.permission_manager.require(
+                                requester_id=self.owner_id,
+                                resource="private-chat:" + private_chat_id,
+                                action="write",
+                                scope=private_chat_id,
+                            )
+                            self.workspace.save_named_history(
+                                participant_name, updated_private_history
+                            )
+                            self.private_histories[participant_name] = updated_private_history
+                        except Exception as exc:
+                            output.text += (
+                                f"\\n\\nPRIVATE HISTORY SAVE DENIED: "
+                                f"{type(exc).__name__}: {exc}"
+                            )
+                            self._append_report(
+                                "participant_private_history_write_denied",
+                                participant=participant_name,
+                                route_id=route_id,
+                                error_type=type(exc).__name__,
+                            )
+                            send.disabled = False
+                            return
+                        finally:
+                            if write_grant:
+                                self.permission_manager.revoke_grant(
+                                    actor_id=self.owner_id, grant_id=write_grant
+                                )
                         last_exchange["messages"] = exchange
                         last_exchange["published"] = False
                         history_text = "\n\n".join(
