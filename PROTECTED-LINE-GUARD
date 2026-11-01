@@ -913,6 +913,618 @@ ACCEPTANCE GATE:
 
 
 ============================================================
+
+========================================================================
+Q003 IMPLEMENTATION CODE APPENDIX — CODE IS STORED IN GUARD ONLY
+========================================================================
+
+Статус: подготовлены конкретные исходные фрагменты для последующего переноса.
+Ограничение текущего коммита: изменяется только PROTECTED-LINE-GUARD.
+Ни один Python/Java/Manifest/CI/test файл этим коммитом не изменяется.
+Код ниже является source material для точечных патчей, а не заявлением,
+что функциональность уже подключена к приложению.
+
+-----------------------------------------------------------------------
+IMPLEMENTATION: Q003-G-IPC-BASE-TO-MONITOR-001
+TARGET: services/diagnostic_ipc.py (новый модуль; Base-side client)
+-----------------------------------------------------------------------
+
+ORIGINAL FRAGMENT BEGIN
+[NEW FILE — no existing fragment]
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+"""Authenticated, bounded, idempotent Base -> Monitor report transport."""
+from __future__ import annotations
+
+import json
+import re
+import time
+import uuid
+from typing import Any
+
+SCHEMA = "yj64.diagnostic.v1"
+MAX_REPORT_BYTES = 64 * 1024
+SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{8,80}$")
+ALLOWED_TOP = {"schema", "agent", "event", "timestamp_ms", "report_id", "data"}
+FORBIDDEN_KEYS = {
+    "api_key", "token", "access_token", "refresh_token", "authorization",
+    "private_messages", "message_content", "chat_history", "prompt",
+}
+
+
+def _clean(value: Any, depth: int = 0) -> Any:
+    if depth > 8:
+        raise ValueError("payload nesting limit exceeded")
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            name = str(key)
+            if name.lower() in FORBIDDEN_KEYS:
+                continue
+            out[name[:80]] = _clean(item, depth + 1)
+        return out
+    if isinstance(value, list):
+        if len(value) > 256:
+            raise ValueError("payload list limit exceeded")
+        return [_clean(x, depth + 1) for x in value]
+    if isinstance(value, str):
+        return value[:4096]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    raise TypeError("unsupported diagnostic payload type")
+
+
+def validate_report(report: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(report, dict) or set(report) - ALLOWED_TOP:
+        raise ValueError("invalid report envelope")
+    if report.get("schema") != SCHEMA:
+        raise ValueError("unsupported diagnostic schema")
+    if not SAFE_ID.fullmatch(str(report.get("report_id", ""))):
+        raise ValueError("invalid report_id")
+    if not str(report.get("event", "")).strip():
+        raise ValueError("event is required")
+    data = _clean(report.get("data", {}))
+    result = {
+        "schema": SCHEMA,
+        "agent": str(report.get("agent", "yj64-base-application"))[:80],
+        "event": str(report["event"])[:120],
+        "timestamp_ms": int(report.get("timestamp_ms") or time.time() * 1000),
+        "report_id": str(report["report_id"]),
+        "data": data,
+    }
+    encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()
+    if len(encoded) > MAX_REPORT_BYTES:
+        raise ValueError("diagnostic report exceeds size limit")
+    return result
+
+
+class BaseToMonitorClient:
+    """Thin Android ContentResolver client; provider performs caller checks."""
+
+    def __init__(self, context: Any, authority: str):
+        self.context = context
+        self.authority = authority
+
+    def deliver(self, report: dict[str, Any]) -> dict[str, Any]:
+        clean = validate_report(report)
+        from jnius import autoclass
+        Uri = autoclass("android.net.Uri")
+        Bundle = autoclass("android.os.Bundle")
+        extras = Bundle()
+        extras.putString("report_json", json.dumps(clean, ensure_ascii=False))
+        result = self.context.getContentResolver().call(
+            Uri.parse("content://" + self.authority),
+            "receive_report", None, extras
+        )
+        if result is None:
+            raise RuntimeError("monitor provider returned no acknowledgement")
+        accepted = bool(result.getBoolean("ok", False))
+        ack_id = str(result.getString("report_id") or "")
+        if not accepted or ack_id != clean["report_id"]:
+            raise RuntimeError(
+                str(result.getString("error") or "monitor acknowledgement mismatch")
+            )
+        return {"ok": True, "report_id": ack_id}
+
+
+def new_report(event: str, **data: Any) -> dict[str, Any]:
+    return validate_report({
+        "schema": SCHEMA,
+        "agent": "yj64-base-application",
+        "event": event,
+        "timestamp_ms": int(time.time() * 1000),
+        "report_id": uuid.uuid4().hex,
+        "data": data,
+    })
+NEW FRAGMENT END
+
+REQUIRED NATIVE PROVIDER CONTRACT (must be enforced in existing
+monitor-app DiagnosticReportProvider.java; not satisfied by Python alone):
+1. exported provider requires signature-level permission, not protectionLevel=normal;
+2. compare Binder.getCallingUid() package set and signing certificate digest
+   against the installed Base package; reject shared/unknown callers;
+3. reject oversized/malformed JSON before persistence;
+4. persist report atomically and fsync/close before returning ok=true;
+5. SQLite UNIQUE(report_id) or equivalent makes retries idempotent;
+6. ACK returns exactly the persisted report_id;
+7. never persist prompts, chat text, private histories, or credentials.
+8. retry only on provider unavailable/transport failure; retain original report_id.
+
+TESTS:
+- malformed schema, unknown envelope key, invalid report_id and >64 KiB rejected;
+- nested forbidden keys removed; strings/list/depth bounded;
+- wrong caller UID/signature rejected by native instrumentation test;
+- duplicate report_id returns stable success without duplicate row;
+- ACK is never sent before durable write.
+
+-----------------------------------------------------------------------
+IMPLEMENTATION: Q003-G-IPC-MONITOR-TO-BASE-002
+TARGET: services/monitor_command_client.py (new Monitor-side client)
+-----------------------------------------------------------------------
+
+ORIGINAL FRAGMENT BEGIN
+[NEW FILE — no existing fragment]
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+"""Allowlisted Monitor -> Base command request client."""
+from __future__ import annotations
+
+import json
+import re
+import time
+import uuid
+from typing import Any
+
+PROTOCOL = "yj64.monitor-command.v1"
+MAX_REQUEST_BYTES = 16 * 1024
+ALLOWED_COMMANDS = {
+    "get_status",
+    "request_report_flush",
+    "request_diagnostic_snapshot",
+}
+ID_RE = re.compile(r"^[a-f0-9]{32}$")
+
+
+def make_request(command: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
+    if command not in ALLOWED_COMMANDS:
+        raise ValueError("command is not allowlisted")
+    if args is not None and not isinstance(args, dict):
+        raise TypeError("args must be an object")
+    request = {
+        "protocol": PROTOCOL,
+        "request_id": uuid.uuid4().hex,
+        "command": command,
+        "created_ms": int(time.time() * 1000),
+        "args": args or {},
+    }
+    raw = json.dumps(request, separators=(",", ":"), ensure_ascii=False).encode()
+    if len(raw) > MAX_REQUEST_BYTES:
+        raise ValueError("request too large")
+    return request
+
+
+class MonitorToBaseClient:
+    def __init__(self, context: Any, authority: str):
+        self.context, self.authority = context, authority
+
+    def call(self, command: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
+        from jnius import autoclass
+        request = make_request(command, args)
+        Uri = autoclass("android.net.Uri")
+        Bundle = autoclass("android.os.Bundle")
+        extras = Bundle()
+        extras.putString("request_json", json.dumps(request))
+        result = self.context.getContentResolver().call(
+            Uri.parse("content://" + self.authority),
+            "execute_command", None, extras
+        )
+        if result is None or not result.getBoolean("ok", False):
+            raise RuntimeError("Base rejected or did not acknowledge command")
+        if str(result.getString("request_id") or "") != request["request_id"]:
+            raise RuntimeError("Base command acknowledgement mismatch")
+        payload = result.getString("result_json") or "{}"
+        decoded = json.loads(str(payload))
+        if not isinstance(decoded, dict):
+            raise RuntimeError("invalid Base command response")
+        return decoded
+NEW FRAGMENT END
+
+REQUIRED BASE PROVIDER CONTRACT (new android_src Java provider, wired via
+buildozer.spec and merged manifest in a separate approved source patch):
+- enforce android:exported=true plus a dedicated signature permission;
+- validate Binder caller UID, installed package and signing certificate digest;
+- accept only PROTOCOL and ALLOWED_COMMANDS above; reject unknown fields/commands;
+- bound request size, argument depth and execution time;
+- use request_id as idempotency key; persist completed result before ACK;
+- get_status is read-only; flush/snapshot commands must not expose message bodies,
+  API keys, private chat content or filesystem paths outside app-private scope;
+- no arbitrary method names, paths, shell commands or Python expressions.
+TESTS:
+- unknown command and altered protocol rejected;
+- wrong UID/signature rejected;
+- duplicate request_id executes at most once;
+- response request_id must match;
+- private-chat canary and API-key canary never appear in response.
+
+-----------------------------------------------------------------------
+IMPLEMENTATION: Q003-H-PERMISSION-ENFORCEMENT-001
+TARGET: permission_manager.py (new unified enforcement module)
+-----------------------------------------------------------------------
+
+ORIGINAL FRAGMENT BEGIN
+[NEW FILE — no existing fragment]
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+"""Default-deny permission checks for YJ-64 protected operations."""
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+import time
+import uuid
+from pathlib import Path
+from threading import RLock
+from typing import Any
+
+class PermissionDenied(PermissionError):
+    pass
+
+
+class PermissionManager:
+    VALID_SCOPES = {"common", "private", "owner", "participant", "diagnostics"}
+    VALID_ACTIONS = {
+        "chat.read", "chat.write", "private.read", "private.write",
+        "archive.common.export", "archive.private.export",
+        "archive.common.import", "archive.private.import",
+        "skills.read", "skills.write", "router.configure",
+        "participant.request", "system_chat.read", "system_chat.write",
+        "memory.read", "memory.write", "diagnostics.read",
+        "diagnostics.command",
+    }
+
+    def __init__(self, user_data_dir: str | Path, owner_id: str):
+        self.root = Path(user_data_dir)
+        self.owner_id = str(owner_id)
+        self.path = self.root / "yj64-permissions.json"
+        self.audit_path = self.root / "yj64-permission-audit.jsonl"
+        self._lock = RLock()
+        self.root.mkdir(parents=True, exist_ok=True)
+        if not self.path.exists():
+            self._atomic_write({"schema": "yj64.permissions.v1", "grants": []})
+
+    @staticmethod
+    def load_or_create_owner_id(user_data_dir: str | Path) -> str:
+        root = Path(user_data_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / "owner-identity.json"
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            value = str(data.get("owner_id", ""))
+            if not value:
+                raise RuntimeError("owner identity is invalid; refusing regeneration")
+            return value
+        value = uuid.uuid4().hex
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"schema": "yj64.owner.v1", "owner_id": value}),
+                       encoding="utf-8")
+        os.replace(tmp, path)
+        return value
+
+    def _read(self) -> dict[str, Any]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("permission store unreadable; default deny") from exc
+        if not isinstance(data, dict) or data.get("schema") != "yj64.permissions.v1":
+            raise RuntimeError("permission store invalid; default deny")
+        grants = data.get("grants")
+        if not isinstance(grants, list):
+            raise RuntimeError("permission grants invalid; default deny")
+        return data
+
+    def _atomic_write(self, data: dict[str, Any]) -> None:
+        fd, name = tempfile.mkstemp(prefix=".permissions-", dir=str(self.root))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(data, stream, ensure_ascii=False, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(name, self.path)
+        finally:
+            if os.path.exists(name):
+                os.unlink(name)
+
+    def grant(self, subject_id: str, action: str, scope: str,
+              granted_by: str) -> None:
+        if action not in self.VALID_ACTIONS or scope not in self.VALID_SCOPES:
+            raise ValueError("unknown permission action or scope")
+        if granted_by != self.owner_id:
+            raise PermissionDenied("only owner may change grants")
+        if not subject_id:
+            raise ValueError("subject_id required")
+        with self._lock:
+            data = self._read()
+            rows = [x for x in data["grants"] if not (
+                x.get("subject_id") == subject_id and x.get("action") == action
+                and x.get("scope") == scope)]
+            rows.append({"subject_id": subject_id, "action": action,
+                         "scope": scope, "granted_by": granted_by,
+                         "created_ms": int(time.time() * 1000)})
+            data["grants"] = rows
+            self._atomic_write(data)
+        self._audit("grant", subject_id, action, scope, True)
+
+    def revoke(self, subject_id: str, action: str, scope: str,
+               revoked_by: str) -> None:
+        if revoked_by != self.owner_id:
+            raise PermissionDenied("only owner may revoke grants")
+        with self._lock:
+            data = self._read()
+            data["grants"] = [x for x in data["grants"] if not (
+                x.get("subject_id") == subject_id and x.get("action") == action
+                and x.get("scope") == scope)]
+            self._atomic_write(data)
+        self._audit("revoke", subject_id, action, scope, True)
+
+    def check(self, subject_id: str, action: str, scope: str,
+              *, owner_action: bool = False) -> bool:
+        allowed = False
+        try:
+            if action not in self.VALID_ACTIONS or scope not in self.VALID_SCOPES:
+                raise PermissionDenied("unknown action or scope")
+            if owner_action and subject_id == self.owner_id:
+                allowed = True
+            else:
+                data = self._read()
+                allowed = any(
+                    x.get("subject_id") == subject_id
+                    and x.get("action") == action and x.get("scope") == scope
+                    and x.get("granted_by") == self.owner_id
+                    for x in data["grants"] if isinstance(x, dict)
+                )
+            if not allowed:
+                raise PermissionDenied(f"denied: {action} [{scope}]")
+            return True
+        finally:
+            self._audit("check", subject_id, action, scope, allowed)
+
+    def require(self, subject_id: str, action: str, scope: str,
+                *, owner_action: bool = False) -> None:
+        self.check(subject_id, action, scope, owner_action=owner_action)
+
+    def _audit(self, operation: str, subject_id: str, action: str,
+               scope: str, allowed: bool) -> None:
+        row = {"timestamp_ms": int(time.time() * 1000),
+               "operation": operation, "subject_id": str(subject_id)[:100],
+               "action": action, "scope": scope, "allowed": bool(allowed)}
+        self.audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.audit_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+NEW FRAGMENT END
+
+MANDATORY APPLICATION HOOKS (must be applied as exact guarded patches):
+- before common/private chat load/save, derive subject_id from authenticated app
+  identity and scope from persisted chat metadata; never infer authorization
+  from visible title or Participant display label;
+- before private history read/write and private request dispatch, require
+  private.read/private.write against exact chat_id scope;
+- before common/private archive export/import, require the matching archive
+  action; private archive owner_id and user_id must both match;
+- before skills write, router credential update, system-chat access, semantic
+  memory read/write and agent tool invocation, call require();
+- before either IPC provider executes a command, enforce diagnostics.command;
+- permission-store parse/I/O error means deny, never fall back to allow.
+IMPORTANT: current app has no connected permission manager. Do not mark this
+patch complete until all listed real call sites are guarded and tested.
+
+-----------------------------------------------------------------------
+IMPLEMENTATION: Q003-F-UNIVERSAL-ROUTER-CONTEXT-001
+TARGET: context_manager.py (new module; tokenizer implementation deferred)
+-----------------------------------------------------------------------
+
+ORIGINAL FRAGMENT BEGIN
+[NEW FILE — no existing fragment]
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+"""Provider-neutral, scope-aware context assembly for all router routes."""
+from __future__ import annotations
+
+import hashlib
+import json
+from typing import Any
+
+VALID_MODES = {"memory_only", "memory_recent", "full_history"}
+VALID_SCOPES = {"common", "private", "participant_system"}
+
+def _text(value: Any, limit: int = 20000) -> str:
+    return str(value or "")[:limit]
+
+def _message(row: dict[str, Any]) -> dict[str, str]:
+    role = str(row.get("role", "user"))
+    if role not in {"system", "user", "assistant"}:
+        role = "user"
+    return {"role": role, "content": _text(row.get("content"))}
+
+class ContextManager:
+    def build(self, *, route_id: str, mode: str,
+              owner_instructions: str = "",
+              participant_instructions: str = "",
+              participant_memory: str = "",
+              semantic_memory: str = "",
+              recent_history: list[dict[str, Any]] | None = None,
+              full_history: list[dict[str, Any]] | None = None,
+              private_history: list[dict[str, Any]] | None = None,
+              scope: str = "common",
+              authorized: bool = False) -> dict[str, Any]:
+        if mode not in VALID_MODES:
+            raise ValueError("unknown context mode")
+        if scope not in VALID_SCOPES:
+            raise ValueError("unknown context scope")
+        if scope == "private" and not authorized:
+            raise PermissionError("private context requires authorization")
+        if not route_id.startswith("route_"):
+            raise ValueError("invalid route identity")
+
+        instructions = []
+        if owner_instructions.strip():
+            instructions.append("OWNER INSTRUCTIONS:\n" + _text(owner_instructions))
+        if participant_instructions.strip():
+            instructions.append("PARTICIPANT SYSTEM INSTRUCTIONS:\n" +
+                                _text(participant_instructions))
+        if participant_memory.strip():
+            instructions.append("PARTICIPANT MEMORY:\n" + _text(participant_memory))
+        if semantic_memory.strip():
+            instructions.append("SEMANTIC MEMORY:\n" + _text(semantic_memory))
+
+        if mode == "memory_only":
+            history = []
+        elif mode == "memory_recent":
+            history = recent_history or []
+        else:
+            history = full_history or []
+
+        # Private requests must never fall back to common history (or vice versa).
+        if scope == "private":
+            history = private_history or []
+        normalized = [_message(x) for x in history if isinstance(x, dict)]
+        system_text = "\n\n".join(instructions)
+        fingerprint_data = {
+            "route_id": route_id, "mode": mode, "scope": scope,
+            "system": system_text, "history": normalized,
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(fingerprint_data, sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()
+        return {
+            "route_id": route_id, "mode": mode, "scope": scope,
+            "system_instructions": system_text,
+            "messages": normalized,
+            "context_fingerprint": fingerprint,
+            "source_counts": {"history": len(normalized),
+                              "system_sections": len(instructions)},
+        }
+NEW FRAGMENT END
+
+ROUTER INTEGRATION CONTRACT (llm_api.py):
+1. generate_response() must build one ContextManager envelope for every route.
+2. Provider adapter receives envelope; OpenAI-compatible chat endpoints map
+   system_instructions to a leading system message; Gemini maps it to
+   systemInstruction; native Mistral endpoint maps only to its documented
+   supported system field. Do not send private metadata or internal keys.
+3. Remove internal envelope fields (fingerprint/source_counts/scope) before
+   HTTP serialization. Never leak api_key or local paths into prompt.
+4. Preserve selected route_id/provider/model; no fallback to another participant.
+5. No silent truncation. The current implementation deliberately uses bounded
+   application strings only as a safety cap, NOT a token budget guarantee.
+6. Provider-specific tokenizer is explicitly deferred until owner supplies
+   the tokenizer design; do not add token counting or claim provider guarantees.
+7. Log only route_id, mode, scope, fingerprint and counts; never log prompt text.
+
+-----------------------------------------------------------------------
+IMPLEMENTATION: Q003-ISOLATION-END-TO-END-TESTS-001
+TARGET: tests/test_q003_isolation_contract.py (new test module)
+-----------------------------------------------------------------------
+
+ORIGINAL FRAGMENT BEGIN
+[NEW FILE — no existing fragment]
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+"""Q-003 security contract tests; use temporary app data, no network."""
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from permission_manager import PermissionManager, PermissionDenied
+from context_manager import ContextManager
+
+class Q003PermissionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.owner = PermissionManager.load_or_create_owner_id(self.root)
+        self.pm = PermissionManager(self.root, self.owner)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_default_deny(self):
+        with self.assertRaises(PermissionDenied):
+            self.pm.require("participant-1", "private.read", "private")
+
+    def test_owner_grant_and_revoke(self):
+        self.pm.grant("participant-1", "private.read", "private", self.owner)
+        self.pm.require("participant-1", "private.read", "private")
+        self.pm.revoke("participant-1", "private.read", "private", self.owner)
+        with self.assertRaises(PermissionDenied):
+            self.pm.require("participant-1", "private.read", "private")
+
+    def test_corrupt_store_denies(self):
+        self.pm.path.write_text("{broken", encoding="utf-8")
+        with self.assertRaises(RuntimeError):
+            self.pm.require("participant-1", "private.read", "private")
+
+class Q003ContextTests(unittest.TestCase):
+    def test_private_requires_authorization(self):
+        cm = ContextManager()
+        with self.assertRaises(PermissionError):
+            cm.build(route_id="route_1", mode="full_history",
+                     scope="private", private_history=[{"content":"CANARY"}])
+
+    def test_private_does_not_mix_common_history(self):
+        cm = ContextManager()
+        result = cm.build(route_id="route_1", mode="full_history",
+            scope="private", authorized=True,
+            private_history=[{"role":"user","content":"PRIVATE_CANARY"}],
+            full_history=[{"role":"user","content":"COMMON_CANARY"}])
+        text = json.dumps(result)
+        self.assertIn("PRIVATE_CANARY", text)
+        self.assertNotIn("COMMON_CANARY", text)
+
+    def test_memory_only_has_no_history(self):
+        result = ContextManager().build(route_id="route_2", mode="memory_only",
+            recent_history=[{"role":"user","content":"HISTORY_CANARY"}])
+        self.assertEqual(result["messages"], [])
+
+if __name__ == "__main__":
+    unittest.main()
+NEW FRAGMENT END
+
+ADDITIONAL REQUIRED E2E TESTS (must be added before acceptance):
+- private chat canary absent from common ZIP and common provider payload;
+- common chat canary absent from private ZIP and private provider payload;
+- API key canary absent from all diagnostic IPC payloads and audit logs;
+- each participant route keeps its own system instructions and memory;
+- actual UI, router, archive, agent-tool and IPC entry points deny by default;
+- monitor->base and base->monitor native provider instrumentation tests verify
+  caller UID/signature, replay/idempotency, durable ACK and payload limits;
+- test real app entry points, not only these isolated helper classes.
+- CI must compile every newly introduced module and run unittest discovery.
+- Android APK build remains manual and must not be run from this Guard-only commit.
+
+-----------------------------------------------------------------------
+IMPLEMENTATION COMPLETENESS / APPLICATION ORDER
+-----------------------------------------------------------------------
+
+1. Add native Base provider and native Monitor provider security changes.
+2. Add the two Python IPC clients and wire the existing Base->Monitor sender.
+3. Add PermissionManager and stable owner identity; preserve existing
+   self.report_path = Path(self.user_data_dir) / REPORT_RELATIVE_PATH
+   during main.py bootstrap edits.
+4. Guard every actual UI/router/archive/agent/system-chat/memory/IPC entry point.
+5. Add ContextManager to the central dispatch path and all provider adapters.
+6. Add the full E2E test set and CI gates.
+7. Run tests; inspect exact changed-file list; only then consider Android build.
+8. Do not mark Q-003 complete because helper modules import or APK builds.
+
+END OF Q003 IMPLEMENTATION CODE APPENDIX
+
 РАЗДЕЛ 5. КОНЕЦ ОПЕРАЦИОННОГО СТОЛА
 
 Перед переносом каждого патча:
