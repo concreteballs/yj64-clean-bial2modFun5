@@ -388,6 +388,270 @@ IMPLEMENTATION GATES:
    переноса патчей с операционного стола.
 
 ---
+
+PATCH-ID: YJ64-PRIVATE-CHAT-MAIN-IDENTITY-001
+
+TARGET FILE: main.py
+
+PURPOSE:
+Получить стабильный локальный owner identity и использовать его для всех
+операций с личными историями. На Android приоритет — ANDROID_ID,
+связанный с приложением/подписью; в тестовой среде — локальный UUID.
+
+ORIGINAL FRAGMENT BEGIN
+
+        self.workspace = ChatWorkspace(self.user_data_dir)
+        chats = self.workspace.list_chats()
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+        self.workspace = ChatWorkspace(self.user_data_dir)
+        self.owner_id = self.workspace.get_local_owner_id()
+        chats = self.workspace.list_chats()
+
+NEW FRAGMENT END
+
+---
+
+PATCH-ID: YJ64-PRIVATE-CHAT-MAIN-OPEN-001
+
+TARGET FILE: main.py
+
+PURPOSE:
+При открытии личного диалога создать/проверить его метаданные и
+проверять requester_id при каждом чтении истории.
+
+ORIGINAL FRAGMENT BEGIN
+
+        history = self.private_histories.setdefault(
+            participant_name, self.workspace.load_named_history(participant_name)
+        )
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+        self.workspace.ensure_private_chat_metadata(
+            participant_name,
+            owner_id=self.owner_id,
+            user_id=self.owner_id,
+            participant_id=route_id,
+        )
+        history = self.private_histories.setdefault(
+            participant_name,
+            self.workspace.load_named_history(
+                participant_name, requester_id=self.owner_id
+            ),
+        )
+
+NEW FRAGMENT END
+
+---
+
+PATCH-ID: YJ64-PRIVATE-CHAT-MAIN-SAVE-001
+
+TARGET FILE: main.py
+
+PURPOSE:
+Проверять полномочия перед записью истории личного диалога.
+
+ORIGINAL FRAGMENT BEGIN
+
+                        self.workspace.save_named_history(
+                            participant_name, self.private_histories[participant_name]
+                        )
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+                        self.workspace.save_named_history(
+                            participant_name,
+                            self.private_histories[participant_name],
+                            requester_id=self.owner_id,
+                        )
+
+NEW FRAGMENT END
+
+---
+
+PATCH-ID: YJ64-PRIVATE-CHAT-MAIN-EXPORT-001
+
+TARGET FILE: main.py
+
+PURPOSE:
+Перед общим экспортом публиковать отдельные ZIP только для личных
+переписок с подтверждёнными метаданными и доступом владельца.
+
+ORIGINAL FRAGMENT BEGIN
+
+            self._save_common_history()
+            self.persistent_core.export_archive(temp_path)
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+            self._save_common_history()
+            self._export_private_chat_archives()
+            self.persistent_core.export_archive(temp_path)
+
+NEW FRAGMENT END
+
+---
+
+PATCH-ID: YJ64-PRIVATE-CHAT-MAIN-PUBLISH-001
+
+TARGET FILE: main.py
+
+PURPOSE:
+Добавить MediaStore-публикацию личных ZIP в Download/YJ-64 с readback,
+SHA-256, ZIP-проверкой и удалением незавершённой записи при ошибке.
+
+ORIGINAL FRAGMENT BEGIN
+
+    def _save_common_history(self) -> None:
+        self.workspace.save_messages(self.current_chat_id, self.common_history)
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+    def _publish_private_zip_to_downloads(
+        self, source_path: Path, display_name: str
+    ) -> int:
+        import zipfile
+        from jnius import autoclass
+
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        ContentValues = autoclass("android.content.ContentValues")
+        MediaStoreDownloads = autoclass("android.provider.MediaStore$Downloads")
+        resolver = PythonActivity.mActivity.getContentResolver()
+        uri = None
+        verify_path = source_path.with_name(source_path.stem + "-readback.zip")
+        try:
+            values = ContentValues()
+            values.put("display_name", display_name)
+            values.put("mime_type", "application/zip")
+            values.put("relative_path", "Download/YJ-64/")
+            values.put("is_pending", 1)
+            uri = resolver.insert(MediaStoreDownloads.EXTERNAL_CONTENT_URI, values)
+            if uri is None:
+                raise IOError("MediaStore did not create private archive")
+            output = resolver.openOutputStream(uri)
+            if output is None:
+                raise IOError("MediaStore output stream unavailable")
+            source_digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
+            copied = 0
+            try:
+                with source_path.open("rb") as source:
+                    while True:
+                        chunk = source.read(65536)
+                        if not chunk:
+                            break
+                        for value_byte in chunk:
+                            output.write(value_byte)
+                        copied += len(chunk)
+                output.flush()
+            finally:
+                output.close()
+            if copied != source_path.stat().st_size or copied <= 0:
+                raise IOError("Private archive write size mismatch")
+            readback = resolver.openInputStream(uri)
+            if readback is None:
+                raise IOError("MediaStore private archive readback unavailable")
+            read_count = 0
+            try:
+                with verify_path.open("wb") as target:
+                    while True:
+                        value_byte = int(readback.read())
+                        if value_byte < 0:
+                            break
+                        target.write(bytes((value_byte & 0xff,)))
+                        read_count += 1
+            finally:
+                readback.close()
+            read_digest = hashlib.sha256(verify_path.read_bytes()).hexdigest()
+            if (
+                read_count != copied
+                or read_digest != source_digest
+                or not zipfile.is_zipfile(verify_path)
+            ):
+                raise IOError("Private archive readback/SHA/ZIP verification failed")
+            with zipfile.ZipFile(verify_path, "r") as archive:
+                if archive.testzip() is not None or "manifest.json" not in archive.namelist():
+                    raise IOError("Private archive integrity check failed")
+            done = ContentValues()
+            done.put("is_pending", 0)
+            resolver.update(uri, done, None, None)
+            return copied
+        except Exception:
+            if uri is not None:
+                try:
+                    resolver.delete(uri, None, None)
+                except Exception:
+                    pass
+            raise
+        finally:
+            verify_path.unlink(missing_ok=True)
+
+    def _export_private_chat_archives(self) -> None:
+        exported = 0
+        for metadata, history in self.workspace.iter_private_histories(
+            requester_id=self.owner_id
+        ):
+            chat_id = str(metadata["chat_id"])
+            safe_id = "".join(
+                char for char in chat_id if char.isalnum() or char in "-_"
+            ) or "private-chat"
+            suffix = uuid.uuid4().hex[:12]
+            archive_path = (
+                Path(self.user_data_dir)
+                / ("YJ-64-private-" + safe_id + "-" + suffix + ".zip")
+            )
+            try:
+                self.persistent_core.export_private_chat_archive(
+                    metadata,
+                    history,
+                    requester_id=self.owner_id,
+                    destination=archive_path,
+                )
+                size_bytes = self._publish_private_zip_to_downloads(
+                    archive_path,
+                    "YJ-64-private-" + safe_id + "-" + suffix + ".zip",
+                )
+                exported += 1
+                self._append_report(
+                    "private_chat_archive_exported",
+                    chat_id=chat_id,
+                    participant_id=metadata.get("participant_id"),
+                    size_bytes=size_bytes,
+                    location="Download/YJ-64",
+                    encrypted=False,
+                )
+            except Exception as exc:
+                self._append_report(
+                    "private_chat_archive_export_failed",
+                    chat_id=chat_id,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+            finally:
+                archive_path.unlink(missing_ok=True)
+        self._append_report(
+            "private_chat_archives_export_finished", exported_count=exported
+        )
+
+    def _save_common_history(self) -> None:
+        self.workspace.save_messages(self.current_chat_id, self.common_history)
+
+NEW FRAGMENT END
+
+---
+
+---
  
 ---
 
