@@ -54,4 +54,7 @@ jobs:
           python3 tools/verify_guard.py
       - name: Compile protected Python modules
         run: |
-          python3 -m py_compile main.py chat_workspace.py yj64_persistent_core.py llm_api.py llm_settings.py message_distributor.py tools/verify_guard.py
+          python3 -m py_compile main.py chat_workspace.py yj64_persistent_core.py permission_manager.py semantic_memory.py context_manager.py system_chat.py llm_api.py llm_settings.py message_distributor.py tools/verify_guard.py
+      - name: Run Q-003 unit tests
+        run: |
+          python3 -m unittest discover -s tests -v
