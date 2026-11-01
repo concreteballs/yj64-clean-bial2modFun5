@@ -4,7 +4,7 @@ on:
   push:
     branches: ['main', 'test/build-diagnostic-2026-10-31']
     paths:
-      - 'PROTECTED-LINE-GUARD'
+      - 'report_diagnostics_manifest.md'
       - 'main.py'
       - 'chat_workspace.py'
       - 'yj64_persistent_core.py'
@@ -17,7 +17,7 @@ on:
   pull_request:
     branches: ['main']
     paths:
-      - 'PROTECTED-LINE-GUARD'
+      - 'report_diagnostics_manifest.md'
       - 'main.py'
       - 'llm_api.py'
       - 'llm_settings.py'
