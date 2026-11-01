@@ -606,6 +606,312 @@ TESTS:
 6. Ошибка после исчерпания попытки записывается в gateway_request_failed.
 
 
+
+---
+
+PATCH-ID: Q003-G-IPC-BASE-TO-MONITOR-001
+
+TARGET FILES:
+- monitor-app/app/src/main/java/org/blackmirror/yj64monitor/DiagnosticReportProvider.java
+- monitor-app/app/src/main/AndroidManifest.xml
+- services/internal_monitor.py
+- config/bridge.json
+- buildozer.spec
+
+PATCH STATUS:
+SPECIFICATION ADDED — executable replacement fragments still require
+exact-source capture and implementation review. Do not transfer this
+specification as if it were completed IPC code.
+
+PURPOSE:
+
+Завершить направление Base -> Monitor на основе существующего
+DiagnosticReportProvider. Сохранить durable acknowledgement и spool
+повторной доставки, но устранить слабые места текущего контракта.
+
+REQUIRED IMPLEMENTATION:
+
+1. Зафиксировать протокол и версию IPC, допустимые методы и размер payload.
+2. Проверять вызывающий UID, package name и подпись приложения
+   (сопоставление сертификата/подписи, а не только имени пакета).
+3. Заменить protectionLevel=normal на согласованную signature-level
+   защиту; проверить, что оба APK подписаны совместимым сертификатом
+   и что permission действительно запрашивается Base.
+4. Проверять схему, типы обязательных полей, report_id, timestamp,
+   agent и размер каждой записи до записи в JSONL.
+5. Запись должна оставаться append-only, flush + fsync до ok=true.
+6. Повторная доставка должна быть идемпотентной по report_id:
+   повтор одного сообщения не создаёт дубликат.
+7. Ответ provider должен содержать protocol_version, accepted report_id
+   и явный код отказа. Не возвращать ok=true до durable persistence.
+8. services/internal_monitor.py сохраняет spool при любой ошибке,
+   подтверждает только точный report_id и продолжает с прежнего offset.
+9. Таймауты и retry ограничены; не блокировать UI-поток.
+10. Секреты, токены и содержимое личных чатов не включать в диагностические
+    события по умолчанию.
+
+TESTS / ACCEPTANCE:
+
+- Только доверенный Base APK с ожидаемой подписью может передать отчёт.
+- Посторонний UID, пакет с неверной подписью и отсутствие permission
+  получают отказ.
+- Неверная схема, пустой report_id и oversized payload отклоняются.
+- После аварийного завершения подтверждённая запись уже находится на диске.
+- Повтор report_id не создаёт второй JSONL record.
+- При недоступном Monitor spool сохраняется и позднее передаётся без потерь
+  и изменения порядка.
+- Невозможность IPC не приводит к остановке Base App.
+
+---
+
+PATCH-ID: Q003-G-IPC-MONITOR-TO-BASE-002
+
+TARGET FILES:
+- android_src/DiagnosticMonitorProvider.java (NEW FILE)
+- buildozer.spec
+- services/internal_monitor.py
+- monitor-app/app/src/main/java/org/blackmirror/yj64monitor/MonitorActivity.java
+- monitor-app/app/src/main/AndroidManifest.xml
+
+PATCH STATUS:
+SPECIFICATION ADDED — new provider and manifest fragments must be authored
+and reviewed before this patch is transferable.
+
+PURPOSE:
+
+Добавить обратное направление Monitor -> Base. Сейчас имеющийся provider
+принимает отчёты Base в Monitor; это не является двусторонним IPC.
+
+REQUIRED IMPLEMENTATION:
+
+1. Добавить ContentProvider внутри Base APK с отдельным authority,
+   отдельным signature permission и явным экспортом только для Monitor.
+2. Зарегистрировать provider через Android manifest overlay, используемый
+   текущей конфигурацией Buildozer; не создавать второй конфликтующий
+   provider authority.
+3. В Monitor добавить клиент вызова Base provider и проверять ответ.
+4. Разрешить только ограниченный набор типизированных операций:
+   monitor_ping, submit_monitor_event, request_status.
+   Никакого произвольного вызова методов, shell-команд, Python-кода,
+   файловых путей или произвольного Intent от удалённого вызывающего.
+5. Любые операции, меняющие состояние Base, должны проходить через
+   PermissionManager и проверку actor/subject/resource/action/scope.
+6. Не передавать владельческие секреты и private histories через IPC.
+7. Проверять calling UID/package/signature на стороне Base provider.
+8. Ввести request_id, protocol_version, timestamp, ограничение payload,
+   durable acknowledgement и идемпотентность повторов.
+9. Monitor должен показывать раздельно состояния Base reachable,
+   permission denied, protocol mismatch и timeout.
+10. Отказ или отсутствие Monitor не должны блокировать обычный запуск Base.
+
+TESTS / ACCEPTANCE:
+
+- Monitor может получить только разрешённый статус Base.
+- Постороннее приложение не может вызвать Base provider.
+- Команда вне allowlist отклоняется.
+- Команда без действующего grant отклоняется и попадает в audit.
+- Повтор request_id не выполняет операцию повторно.
+- При выключенном/недоступном Base Monitor корректно показывает offline.
+- Проверены обе стороны IPC на реальных Android APK, а не только mock-тестом.
+
+---
+
+PATCH-ID: Q003-H-PERMISSION-ENFORCEMENT-001
+
+TARGET FILES:
+- main.py
+- message_distributor.py
+- llm_api.py
+- chat_workspace.py
+- yj64_persistent_core.py
+- services/internal_monitor.py
+- android_src/DiagnosticMonitorProvider.java
+- monitor-app/app/src/main/java/org/blackmirror/yj64monitor/DiagnosticReportProvider.java
+
+PATCH STATUS:
+SPECIFICATION ADDED — exact source fragments and call-site replacements
+must be captured separately for every target before implementation.
+
+PURPOSE:
+
+Подключить уже подготовленный PermissionManager к фактическим точкам
+операций. Наличие класса PermissionManager и его bootstrap в main.py
+не является защитой, пока операция может выполниться без require/check.
+
+REQUIRED IMPLEMENTATION:
+
+1. Ввести единый helper приложения, который передаёт в PermissionManager
+   доверенные requester_id, resource, action и scope.
+2. Default Deny: отсутствие, повреждение или неоднозначность grant/store
+   означает отказ; никаких автоматических grant при старте.
+3. UI: проверять разрешение до открытия/чтения/изменения private chat,
+   local skills, настроек, owner instructions и permission grants.
+4. Router: проверять право до отправки сообщения провайдеру; subject
+   определяется доверенным route_id, а не display name или текстом модели.
+5. Private history: отдельные read/write проверки до каждого чтения,
+   изменения, удаления и экспорта; проверять owner_id/user_id и chat_id.
+6. Common/private archive: отдельные read/export grants до сбора файлов,
+   до создания ZIP и перед публикацией через MediaStore/SAF.
+7. Agent tools: проверять каждый tool invocation по типу операции;
+   запрещать выполнение до проверки, а не только регистрировать отказ после.
+8. SystemChatStore и SemanticMemory: владелец управляет инструкциями;
+   участник получает только свой participant_id scope.
+9. IPC: обе стороны проверяют право на каждую state-changing операцию.
+10. Service management: start/stop/reconfigure internal monitor требует
+    service_management grant.
+11. Build/publish/commit относятся к отдельным действиям и не получают
+    разрешение из обычного read/write grant.
+12. Аудитировать allow и deny с operation_id; не записывать в audit
+    содержимое приватных сообщений, API keys и токены.
+13. Ни один exception в permission check не должен приводить к fail-open.
+14. Не считать PermissionManager OS sandbox: он защищает прикладной
+    workflow, но не изолирует вредоносный код внутри того же UID/process.
+
+TESTS / ACCEPTANCE:
+
+- Для каждого защищённого call site есть тест, доказывающий отказ без grant.
+- Grant с неверным subject/resource/action/scope не подходит.
+- Просроченный и отозванный grant не позволяет операцию.
+- Ошибка/повреждение permission store приводит к отказу без перезаписи.
+- UI, router, archive, agent tools, IPC и service management проверены.
+- Тесты подтверждают, что после отказа побочный эффект не произошёл.
+- Аудит фиксирует allow/deny и operation_id без утечки private content.
+
+---
+
+PATCH-ID: Q003-F-UNIVERSAL-ROUTER-CONTEXT-001
+
+TARGET FILES:
+- main.py
+- message_distributor.py
+- llm_api.py
+- llm_settings.py
+- context_manager.py
+- semantic_memory.py
+- system_chat.py
+
+PATCH STATUS:
+SPECIFICATION ADDED — provider request adapters and exact source fragments
+must be prepared before this patch is transferable.
+
+PURPOSE:
+
+Подключить выбранный режим контекста и правильные system instructions
+к каждому фактически выбранному route/provider/model, а не только к
+отдельному провайдеру или тестовому пути.
+
+REQUIRED IMPLEMENTATION:
+
+1. Единая точка подготовки запроса получает trusted route_id, выбранный
+   provider/model, transport mode (text/agent), context mode и scope.
+2. Контекст строится через ContextManager из правильных источников:
+   common history для общего диалога; private history только для текущего
+   private chat; participant-scoped semantic memory только текущего route.
+3. Owner instructions, participant system instructions, participant
+   system chat, semantic memory, recent messages и raw history остаются
+   отдельными слоями с provenance; нельзя сливать их в один неразличимый
+   список до проверки scope.
+4. Каждый provider adapter преобразует системный слой в нативный формат
+   API этого провайдера. Нельзя отправлять role=system как обычное user
+   сообщение там, где API имеет отдельное поле system/developer instruction.
+5. Для каждого провайдера сохраняется исходный смысл ролей и порядок
+   сообщений; неподдерживаемые поля удаляются только из транспортной
+   копии, исходная локальная история не меняется.
+6. Одинаковая подготовка контекста применяется ко всем моделям, выбранным
+   пользователем, включая последующие новые provider adapters.
+7. Ошибка контекста, неизвестный mode или превышение настроенного бюджета
+   возвращает явную ошибку и не вызывает fallback на другого участника.
+8. Full History не обрезается молча. Если выбранный режим невозможно
+   исполнить целиком, возвращается диагностируемая ошибка.
+9. Не вводить сейчас provider-specific tokenizer. До отдельного решения
+   владельца token_counter остаётся явно обозначенной оценкой/лимитом
+   приложения, не гарантией provider token limit.
+10. В запросах и отчётах фиксировать route_id, provider, model,
+    context_mode и provenance summary без публикации private message text.
+
+TESTS / ACCEPTANCE:
+
+- Набор контрактных тестов проходит для каждого поддерживаемого provider adapter.
+- Один и тот же набор исходных слоёв сохраняет одинаковую семантику
+  для всех выбранных моделей.
+- Private message никогда не попадает в common/другой participant payload.
+- Participant 1 не получает system chat/memory Participant 2 и наоборот.
+- Owner instructions нельзя изменить из ответа модели.
+- text и agent используют одинаковую политику контекста, различается
+  только транспортная упаковка.
+- Провайдерский adapter не изменяет сохранённую историю.
+- Нет silent fallback на Gemini или другой route при ошибке выбранного route.
+- Тесты явно маркируют token count как app estimate до отдельной интеграции
+  точных provider tokenizers.
+
+---
+
+PATCH-ID: Q003-ISOLATION-END-TO-END-TESTS-001
+
+TARGET FILES:
+- tests/test_permission_integration.py (NEW FILE)
+- tests/test_private_context_isolation.py (NEW FILE)
+- tests/test_router_context_contract.py (NEW FILE)
+- tests/test_archive_privacy.py (NEW FILE)
+- tests/test_diagnostic_ipc_contract.py (NEW FILE)
+- main.py
+- message_distributor.py
+- llm_api.py
+- chat_workspace.py
+- yj64_persistent_core.py
+- permission_manager.py
+- semantic_memory.py
+- context_manager.py
+- system_chat.py
+
+PATCH STATUS:
+SPECIFICATION ADDED — test implementations must exercise real integration
+entry points; isolated class-only unit tests are insufficient.
+
+PURPOSE:
+
+Добавить сквозные тесты фактической изоляции данных и исполнения разрешений.
+Тесты должны доказывать отсутствие утечки и отсутствие побочных эффектов
+при отказе, а не только успешное создание объектов.
+
+REQUIRED TEST MATRIX:
+
+1. Common chat -> только common context и разрешённые общие memory items.
+2. Private chat A -> только chat A, owner-authorized instructions и память
+   с тем же participant/chat scope.
+3. Private chat B -> не содержит ни одного message_id/content из chat A.
+4. Participant 1 -> не получает system chat, private history или memory
+   Participant 2; обратное также проверяется.
+5. Общий ZIP -> не включает histories/, private metadata, private system
+   chats и participant-private memory.
+6. Private ZIP -> содержит только один разрешённый chat_id и не содержит
+   другие чаты/общую историю без отдельного разрешения.
+7. Неопределённые/неполные chat metadata -> не экспортируются ни в common,
+   ни в private archive до явной классификации.
+8. Запросы всех provider adapters проверяются на отсутствие чужих private
+   messages, owner secrets и неподходящих system instructions.
+9. Deny на read/write/export/publish/router/tool/service action доказывает,
+   что операция и побочные эффекты не произошли.
+10. Повреждённое хранилище permissions/memory/system chat не приводит
+    к созданию пустой замены или к разрешению доступа.
+11. IPC тестирует обе стороны, подпись/UID, allowlist, replay/idempotency,
+    timeout и восстановление после spool.
+12. Проверки выполняются на уровне реальных application entry points;
+    mocks допускаются для внешней сети, но не вместо внутренней политики
+    доступа и выбора контекста.
+
+ACCEPTANCE GATE:
+
+- Каждый тест содержит позитивный и негативный сценарий.
+- Для изоляции используются уникальные canary message_id и секретные
+  строки-маркеры, проверяемые во всех собранных payload/ZIP.
+- Проверяются JSONL, ZIP manifest, provider request payload и IPC payload.
+- CI обязан запускать эти тесты и завершаться ошибкой при любом нарушении.
+- До прохождения всего набора Q003-G/H и private-isolation нельзя считать
+  Q-003 завершённым и нельзя объявлять его production-ready.
+
+
+
 ============================================================
 РАЗДЕЛ 5. КОНЕЦ ОПЕРАЦИОННОГО СТОЛА
 
