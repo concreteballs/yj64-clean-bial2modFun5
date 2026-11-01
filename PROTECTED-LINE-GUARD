@@ -1525,6 +1525,471 @@ IMPLEMENTATION COMPLETENESS / APPLICATION ORDER
 
 END OF Q003 IMPLEMENTATION CODE APPENDIX
 
+
+========================================================================
+Q003 NATIVE ANDROID IPC PROVIDER SOURCE — PREPARED, NOT YET INTEGRATED
+========================================================================
+
+Эти два Java-файла являются точными новыми исходниками. Они должны быть
+перенесены только после этой Guard-записи. Обе APK должны быть подписаны
+одним и тем же сертификатом: signature permission и SHA-256 signer check
+намеренно отклонят разные сертификаты. Не ослаблять защиту до normal.
+
+-----------------------------------------------------------------------
+TARGET: android_src/org/blackmirror/blackmirror/DiagnosticMonitorProvider.java
+ORIGINAL FRAGMENT BEGIN
+[NEW FILE]
+ORIGINAL FRAGMENT END
+NEW FRAGMENT BEGIN
+package org.blackmirror.blackmirror;
+
+import android.content.ContentProvider;
+import android.content.ContentValues;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.Signature;
+import android.content.pm.SigningInfo;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.Binder;
+import android.os.Build;
+import android.os.Bundle;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Set;
+
+public final class DiagnosticMonitorProvider extends ContentProvider {
+    private static final String MONITOR_PACKAGE = "org.blackmirror.yj64monitor";
+    private static final String PERMISSION =
+        "org.blackmirror.blackmirror.permission.MONITOR_COMMAND";
+    private static final String AUTHORITY = "org.blackmirror.blackmirror.diagnostics";
+    private static final String PROTOCOL = "yj64.monitor-command.v1";
+    private static final int MAX_BYTES = 16 * 1024;
+    private static final Set<String> COMMANDS = new HashSet<>(Arrays.asList(
+        "get_status", "request_report_flush", "request_diagnostic_snapshot"
+    ));
+    private static final Set<String> TOP_KEYS = new HashSet<>(Arrays.asList(
+        "protocol", "request_id", "command", "created_ms", "args"
+    ));
+
+    @Override public boolean onCreate() { return true; }
+
+    @Override public synchronized Bundle call(String method, String arg, Bundle extras) {
+        Bundle out = new Bundle();
+        String requestId = "";
+        try {
+            if (!"execute_command".equals(method)) throw new IllegalArgumentException("unsupported_method");
+            verifyCaller();
+            if (extras == null) throw new IllegalArgumentException("extras_missing");
+            String raw = extras.getString("request_json");
+            if (raw == null || raw.getBytes(StandardCharsets.UTF_8).length > MAX_BYTES)
+                throw new IllegalArgumentException("request_missing_or_oversized");
+            JSONObject request = new JSONObject(raw);
+            requireExactKeys(request, TOP_KEYS);
+            if (!PROTOCOL.equals(request.optString("protocol")))
+                throw new IllegalArgumentException("unsupported_protocol");
+            requestId = request.optString("request_id");
+            if (!requestId.matches("[a-f0-9]{32}"))
+                throw new IllegalArgumentException("invalid_request_id");
+            String command = request.optString("command");
+            if (!COMMANDS.contains(command)) throw new SecurityException("command_not_allowlisted");
+            JSONObject args = request.optJSONObject("args");
+            if (args == null || args.length() != 0)
+                throw new IllegalArgumentException("command_arguments_not_supported");
+            JSONObject result = readAck(requestId);
+            if (result == null) {
+                result = execute(command);
+                writeAck(requestId, result);
+            }
+            out.putBoolean("ok", true);
+            out.putString("request_id", requestId);
+            out.putString("result_json", result.toString());
+        } catch (Exception e) {
+            out.putBoolean("ok", false);
+            out.putString("request_id", requestId);
+            out.putString("error", e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage()));
+        }
+        return out;
+    }
+
+    private void verifyCaller() throws Exception {
+        if (getContext().checkCallingPermission(PERMISSION) != PackageManager.PERMISSION_GRANTED)
+            throw new SecurityException("signature_permission_denied");
+        int uid = Binder.getCallingUid();
+        String[] packages = getContext().getPackageManager().getPackagesForUid(uid);
+        if (packages == null || packages.length != 1 || !MONITOR_PACKAGE.equals(packages[0]))
+            throw new SecurityException("caller_uid_package_mismatch");
+        String base = signerDigest(getContext().getPackageName());
+        String monitor = signerDigest(MONITOR_PACKAGE);
+        if (!base.equals(monitor)) throw new SecurityException("caller_signing_certificate_mismatch");
+    }
+
+    private String signerDigest(String packageName) throws Exception {
+        PackageManager pm = getContext().getPackageManager();
+        PackageInfo info;
+        if (Build.VERSION.SDK_INT >= 28) {
+            info = pm.getPackageInfo(packageName, PackageManager.GET_SIGNING_CERTIFICATES);
+        } else {
+            info = pm.getPackageInfo(packageName, PackageManager.GET_SIGNATURES);
+        }
+        Signature[] signatures;
+        if (Build.VERSION.SDK_INT >= 28) {
+            SigningInfo signing = info.signingInfo;
+            if (signing == null) throw new SecurityException("signing_info_missing");
+            signatures = signing.getApkContentsSigners();
+        } else {
+            signatures = info.signatures;
+        }
+        if (signatures == null || signatures.length != 1)
+            throw new SecurityException("unexpected_signer_count");
+        byte[] digest = MessageDigest.getInstance("SHA-256").digest(signatures[0].toByteArray());
+        StringBuilder hex = new StringBuilder();
+        for (byte b : digest) hex.append(String.format("%02x", b & 0xff));
+        return hex.toString();
+    }
+
+    private JSONObject execute(String command) throws Exception {
+        File root = getContext().getFilesDir();
+        File reports = new File(root, "yj64-reports/yj64-report.jsonl");
+        JSONObject result = new JSONObject();
+        if ("get_status".equals(command)) {
+            result.put("status_available", new File(root, "diagnostic-agent-status.json").isFile());
+            result.put("base_package", getContext().getPackageName());
+        } else if ("request_report_flush".equals(command)) {
+            if (reports.isFile()) {
+                try (FileOutputStream stream = new FileOutputStream(reports, true)) {
+                    stream.flush();
+                    stream.getFD().sync();
+                }
+            }
+            result.put("flushed", true);
+            result.put("report_bytes", reports.isFile() ? reports.length() : 0);
+        } else if ("request_diagnostic_snapshot".equals(command)) {
+            long lines = 0;
+            if (reports.isFile()) {
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                        new FileInputStream(reports), StandardCharsets.UTF_8))) {
+                    while (reader.readLine() != null) lines++;
+                }
+            }
+            result.put("report_lines", lines);
+            result.put("report_bytes", reports.isFile() ? reports.length() : 0);
+            result.put("status_available", new File(root, "diagnostic-agent-status.json").isFile());
+        } else {
+            throw new SecurityException("unsupported_command");
+        }
+        return result;
+    }
+
+    private File ackFile() { return new File(getContext().getFilesDir(), "yj64-monitor-command-acks.json"); }
+
+    private JSONObject readAck(String id) throws Exception {
+        File file = ackFile();
+        if (!file.isFile()) return null;
+        JSONObject all = new JSONObject(readText(file, 256 * 1024));
+        JSONObject acks = all.optJSONObject("acks");
+        return acks == null ? null : acks.optJSONObject(id);
+    }
+
+    private void writeAck(String id, JSONObject result) throws Exception {
+        File file = ackFile();
+        JSONObject all = new JSONObject();
+        if (file.isFile()) {
+            try { all = new JSONObject(readText(file, 256 * 1024)); }
+            catch (Exception ignored) { all = new JSONObject(); }
+        }
+        JSONObject acks = all.optJSONObject("acks");
+        if (acks == null) acks = new JSONObject();
+        acks.put(id, result);
+        JSONArray ids = acks.names();
+        if (ids != null && ids.length() > 500) {
+            for (int i = 0; i < ids.length() - 500; i++) acks.remove(ids.getString(i));
+        }
+        all.put("schema", "yj64.monitor-command-acks.v1");
+        all.put("acks", acks);
+        File temp = new File(file.getParentFile(), file.getName() + ".tmp");
+        try (FileOutputStream stream = new FileOutputStream(temp, false)) {
+            stream.write(all.toString().getBytes(StandardCharsets.UTF_8));
+            stream.flush();
+            stream.getFD().sync();
+        }
+        if (!temp.renameTo(file)) {
+            if (file.exists() && !file.delete()) throw new IllegalStateException("ack_replace_failed");
+            if (!temp.renameTo(file)) throw new IllegalStateException("ack_replace_failed");
+        }
+    }
+
+    private String readText(File file, int max) throws Exception {
+        if (file.length() > max) throw new IllegalArgumentException("ack_store_oversized");
+        byte[] bytes = new byte[(int) file.length()];
+        try (FileInputStream in = new FileInputStream(file)) {
+            int offset = 0, count;
+            while (offset < bytes.length && (count = in.read(bytes, offset, bytes.length - offset)) > 0)
+                offset += count;
+            if (offset != bytes.length) throw new IllegalStateException("short_read");
+        }
+        return new String(bytes, StandardCharsets.UTF_8);
+    }
+
+    private void requireExactKeys(JSONObject object, Set<String> allowed) throws Exception {
+        Iterator<String> keys = object.keys();
+        while (keys.hasNext()) if (!allowed.contains(keys.next()))
+            throw new IllegalArgumentException("unknown_request_field");
+    }
+
+    @Override public Cursor query(Uri uri, String[] projection, String selection, String[] args, String sort) { return null; }
+    @Override public String getType(Uri uri) { return null; }
+    @Override public Uri insert(Uri uri, ContentValues values) { return null; }
+    @Override public int delete(Uri uri, String selection, String[] args) { return 0; }
+    @Override public int update(Uri uri, ContentValues values, String selection, String[] args) { return 0; }
+}
+NEW FRAGMENT END
+
+-----------------------------------------------------------------------
+TARGET: monitor-app/app/src/main/java/org/blackmirror/yj64monitor/DiagnosticReportProvider.java
+ORIGINAL FRAGMENT BEGIN
+[REPLACE EXISTING FILE — exact current content SHA must be rechecked]
+ORIGINAL FRAGMENT END
+NEW FRAGMENT BEGIN
+package org.blackmirror.yj64monitor;
+
+import android.content.ContentProvider;
+import android.content.ContentValues;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.Signature;
+import android.content.pm.SigningInfo;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.Binder;
+import android.os.Build;
+import android.os.Bundle;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Set;
+
+public final class DiagnosticReportProvider extends ContentProvider {
+    private static final String BASE_PACKAGE = "org.blackmirror.blackmirror";
+    private static final String PERMISSION =
+        "org.blackmirror.yj64monitor.permission.RECEIVE_REPORT";
+    private static final String SCHEMA = "yj64.diagnostic.v1";
+    private static final int MAX_BYTES = 64 * 1024;
+    private static final Set<String> TOP_KEYS = new HashSet<>(Arrays.asList(
+        "schema", "agent", "event", "timestamp_ms", "report_id", "data"
+    ));
+    private static final Set<String> FORBIDDEN = new HashSet<>(Arrays.asList(
+        "api_key", "token", "access_token", "refresh_token", "authorization",
+        "private_messages", "message_content", "chat_history", "prompt"
+    ));
+
+    @Override public boolean onCreate() { return true; }
+
+    @Override public synchronized Bundle call(String method, String arg, Bundle extras) {
+        Bundle result = new Bundle();
+        String reportId = "";
+        try {
+            if (!"receive_report".equals(method)) throw new IllegalArgumentException("unsupported_method");
+            verifyCaller();
+            if (extras == null) throw new IllegalArgumentException("extras_missing");
+            String raw = extras.getString("report_json");
+            if (raw == null || raw.getBytes(StandardCharsets.UTF_8).length > MAX_BYTES)
+                throw new IllegalArgumentException("report_missing_or_oversized");
+            JSONObject report = new JSONObject(raw);
+            requireExactKeys(report, TOP_KEYS);
+            if (!SCHEMA.equals(report.optString("schema")))
+                throw new IllegalArgumentException("unsupported_schema");
+            reportId = report.optString("report_id");
+            if (!reportId.matches("[a-f0-9]{32}"))
+                throw new IllegalArgumentException("invalid_report_id");
+            if (report.optString("event").trim().isEmpty())
+                throw new IllegalArgumentException("event_required");
+            JSONObject data = report.optJSONObject("data");
+            if (data == null) throw new IllegalArgumentException("data_must_be_object");
+            validateValue(report, 0);
+            File directory = new File(getContext().getFilesDir(), "yj64-reports");
+            if (!directory.exists() && !directory.mkdirs())
+                throw new IllegalStateException("report_directory_unavailable");
+            File file = new File(directory, "yj64-report.jsonl");
+            if (alreadyStored(file, reportId)) {
+                result.putBoolean("ok", true);
+                result.putString("report_id", reportId);
+                result.putBoolean("duplicate", true);
+                return result;
+            }
+            try (FileOutputStream out = new FileOutputStream(file, true)) {
+                out.write((report.toString() + "\n").getBytes(StandardCharsets.UTF_8));
+                out.flush();
+                out.getFD().sync();
+            }
+            result.putBoolean("ok", true);
+            result.putString("report_id", reportId);
+            result.putBoolean("duplicate", false);
+        } catch (Exception error) {
+            result.putBoolean("ok", false);
+            result.putString("report_id", reportId);
+            result.putString("error_type", error.getClass().getSimpleName());
+            result.putString("error", String.valueOf(error.getMessage()));
+        }
+        return result;
+    }
+
+    private void verifyCaller() throws Exception {
+        if (getContext().checkCallingPermission(PERMISSION) != PackageManager.PERMISSION_GRANTED)
+            throw new SecurityException("signature_permission_denied");
+        int uid = Binder.getCallingUid();
+        String[] packages = getContext().getPackageManager().getPackagesForUid(uid);
+        if (packages == null || packages.length != 1 || !BASE_PACKAGE.equals(packages[0]))
+            throw new SecurityException("caller_uid_package_mismatch");
+        if (!signerDigest(getContext().getPackageName()).equals(signerDigest(BASE_PACKAGE)))
+            throw new SecurityException("caller_signing_certificate_mismatch");
+    }
+
+    private String signerDigest(String packageName) throws Exception {
+        PackageManager pm = getContext().getPackageManager();
+        PackageInfo info = Build.VERSION.SDK_INT >= 28
+            ? pm.getPackageInfo(packageName, PackageManager.GET_SIGNING_CERTIFICATES)
+            : pm.getPackageInfo(packageName, PackageManager.GET_SIGNATURES);
+        Signature[] signatures;
+        if (Build.VERSION.SDK_INT >= 28) {
+            SigningInfo signing = info.signingInfo;
+            if (signing == null) throw new SecurityException("signing_info_missing");
+            signatures = signing.getApkContentsSigners();
+        } else signatures = info.signatures;
+        if (signatures == null || signatures.length != 1)
+            throw new SecurityException("unexpected_signer_count");
+        byte[] digest = MessageDigest.getInstance("SHA-256").digest(signatures[0].toByteArray());
+        StringBuilder hex = new StringBuilder();
+        for (byte b : digest) hex.append(String.format("%02x", b & 0xff));
+        return hex.toString();
+    }
+
+    private boolean alreadyStored(File file, String id) throws Exception {
+        if (!file.isFile()) return false;
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                new FileInputStream(file), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                try { if (id.equals(new JSONObject(line).optString("report_id"))) return true; }
+                catch (Exception ignored) { }
+            }
+        }
+        return false;
+    }
+
+    private void validateValue(Object value, int depth) throws Exception {
+        if (depth > 8) throw new IllegalArgumentException("payload_depth_exceeded");
+        if (value instanceof JSONObject) {
+            JSONObject object = (JSONObject) value;
+            Iterator<String> keys = object.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                if (FORBIDDEN.contains(key.toLowerCase()))
+                    throw new SecurityException("sensitive_payload_field_rejected");
+                validateValue(object.get(key), depth + 1);
+            }
+        } else if (value instanceof JSONArray) {
+            JSONArray array = (JSONArray) value;
+            if (array.length() > 256) throw new IllegalArgumentException("payload_list_limit");
+            for (int i = 0; i < array.length(); i++) validateValue(array.get(i), depth + 1);
+        } else if (value instanceof String) {
+            if (((String) value).length() > 4096)
+                throw new IllegalArgumentException("payload_string_limit");
+        } else if (!(value == JSONObject.NULL || value instanceof Number || value instanceof Boolean)) {
+            throw new IllegalArgumentException("unsupported_payload_value");
+        }
+    }
+
+    private void requireExactKeys(JSONObject object, Set<String> allowed) throws Exception {
+        Iterator<String> keys = object.keys();
+        while (keys.hasNext()) if (!allowed.contains(keys.next()))
+            throw new IllegalArgumentException("unknown_report_field");
+    }
+
+    @Override public Cursor query(Uri uri, String[] projection, String selection, String[] args, String sort) { return null; }
+    @Override public String getType(Uri uri) { return null; }
+    @Override public Uri insert(Uri uri, ContentValues values) { return null; }
+    @Override public int delete(Uri uri, String selection, String[] args) { return 0; }
+    @Override public int update(Uri uri, ContentValues values, String selection, String[] args) { return 0; }
+}
+NEW FRAGMENT END
+
+-----------------------------------------------------------------------
+MANIFEST / BUILD WIRING — REQUIRED EXACT PATCHES
+-----------------------------------------------------------------------
+
+Base app buildozer.spec:
+- add android.permission
+  org.blackmirror.blackmirror.permission.MONITOR_COMMAND
+- retain org.blackmirror.yj64monitor.permission.RECEIVE_REPORT
+- register DiagnosticMonitorProvider with authority
+  org.blackmirror.blackmirror.diagnostics, exported=true, permission
+  org.blackmirror.blackmirror.permission.MONITOR_COMMAND
+- retain existing queries entries and MonitorActivity process wiring.
+
+Base manifest must declare:
+<permission android:name="org.blackmirror.blackmirror.permission.MONITOR_COMMAND"
+            android:protectionLevel="signature" />
+and provider declaration under application:
+<provider android:name="org.blackmirror.blackmirror.DiagnosticMonitorProvider"
+          android:authorities="org.blackmirror.blackmirror.diagnostics"
+          android:exported="true"
+          android:permission="org.blackmirror.blackmirror.permission.MONITOR_COMMAND" />
+
+Monitor app manifest:
+- change RECEIVE_REPORT protectionLevel from normal to signature;
+- add uses-permission for Base MONITOR_COMMAND;
+- retain provider authority and exported=true with RECEIVE_REPORT permission.
+
+No manifest edit is complete until the generated Base APK manifest is inspected
+and confirms exactly one provider declaration and exactly one signature
+permission declaration. Confirm both APK signing certificates are identical
+before installation/testing. If not identical, stop: do not weaken permission.
+
+-----------------------------------------------------------------------
+BASE PROVIDER COMMAND CONTRACT
+-----------------------------------------------------------------------
+Only get_status, request_report_flush and request_diagnostic_snapshot are
+accepted. All command args must be empty. The provider returns only status
+availability, report line count and byte count; never message bodies, prompts,
+private histories, credentials or arbitrary paths. request_id is an idempotency
+key persisted atomically. Provider writes/flushes are fsynced before ACK.
+
+-----------------------------------------------------------------------
+MONITOR PROVIDER REPORT CONTRACT
+-----------------------------------------------------------------------
+Only schema yj64.diagnostic.v1 and exact envelope fields are accepted.
+Caller UID must map to exactly the Base package and signer digest must match.
+Payload maximum 64 KiB; nested depth maximum 8; arrays maximum 256; strings
+maximum 4096. Sensitive fields are rejected. report_id is unique and retries
+are idempotent by scanning the durable JSONL before append. ACK is returned
+only after fsync.
+
+END OF NATIVE ANDROID IPC PROVIDER SOURCE
+
 РАЗДЕЛ 5. КОНЕЦ ОПЕРАЦИОННОГО СТОЛА
 
 Перед переносом каждого патча:
