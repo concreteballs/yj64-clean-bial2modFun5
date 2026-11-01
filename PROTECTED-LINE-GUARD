@@ -870,6 +870,216 @@ TESTS:
 6. Ошибка после исчерпания попытки записывается в gateway_request_failed.
 
 
+---
+
+PATCH-ID: YJ64-PRIVATE-CHAT-ACCEPTANCE-001
+
+TARGET FILE: tests/test_private_chat_archives.py
+
+PURPOSE:
+
+Создать отдельный regression test module для этапа Q003-A.
+Этот патч создаёт новый файл; существующий рабочий файл не заменяется.
+
+ORIGINAL FILE STATE:
+
+ABSENT — tests/test_private_chat_archives.py отсутствует в исходной ветке.
+Перед переносом повторно проверить отсутствие файла в целевой ветке.
+Если файл уже существует, остановиться и подготовить отдельный patch
+с его точным исходным содержимым.
+
+NEW FILE REQUIREMENTS:
+
+1. Legacy history без sidecar metadata:
+   - не считается common;
+   - не включается в общий ZIP;
+   - не экспортируется как private ZIP без подтверждённого владельца;
+   - исходный JSON и сообщения остаются без изменений.
+2. Private metadata с корректными chat_id, owner_id, user_id,
+   visibility=private и chat_type=personal:
+   - доступна только разрешённому requester;
+   - чужой requester получает PermissionError/deny;
+   - пустой requester всегда получает deny.
+3. Два разных private chat_id создают два отдельных ZIP.
+   Содержимое одного ZIP не содержит сообщений другого.
+4. Каждый private ZIP имеет manifest и SHA-256 для каждого payload-файла.
+   Проверяются zip.testzip(), размеры и контрольные суммы.
+5. Общий накопительный ZIP не содержит ни histories/*.json,
+   ни histories/*.meta.json, ни других файлов из histories/.
+6. Проверить повторный экспорт: ранее созданный ZIP не перезаписывается.
+7. Проверить повреждённый JSON/metadata: экспорт завершается безопасным
+   отказом, исходные файлы не удаляются и не исправляются молча.
+8. Проверить, что private archive export не объявляет ZIP зашифрованным.
+9. Проверить сохранность текущего накопительного общего архива:
+   manifest, SHA-256, atomic replace и старые накопленные ZIP не меняются.
+
+NEW FILE TEST CASES (минимум):
+
+- test_legacy_history_is_not_classified_or_exported
+- test_private_access_requires_matching_owner_or_user
+- test_empty_and_foreign_requester_are_denied
+- test_two_private_chat_ids_produce_separate_archives
+- test_private_archive_manifest_and_sha256_are_verified
+- test_common_archive_excludes_histories_and_sidecars
+- test_private_archive_does_not_overwrite_existing_file
+- test_corrupt_metadata_is_rejected_without_data_loss
+- test_existing_cumulative_archive_is_not_rewritten
+
+ACCEPTANCE:
+
+Все тесты выполняются командой:
+python3 -m unittest discover -s tests -p 'test_private_chat_archives.py' -v
+
+Не использовать фиктивные заглушки вместо вызова реальных методов
+ChatWorkspace/PersistentCore. Тестировать фактический результат ZIP.
+
+---
+
+PATCH-ID: YJ64-PRIVATE-CHAT-CI-001
+
+TARGET FILE: .github/workflows/ci.yml
+
+PURPOSE:
+
+Подключить privacy/archive regression tests к существующему CI.
+Сохранить текущий Guard verification и py_compile.
+
+ORIGINAL FRAGMENT BEGIN
+
+      - name: Compile protected Python modules
+        run: |
+          python3 -m py_compile main.py chat_workspace.py yj64_persistent_core.py llm_api.py llm_settings.py message_distributor.py tools/verify_guard.py
+
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+
+      - name: Run private-chat archive regression tests
+        run: |
+          python3 -m unittest discover -s tests -p 'test_private_chat_archives.py' -v
+      - name: Compile protected Python modules
+        run: |
+          python3 -m py_compile main.py chat_workspace.py yj64_persistent_core.py llm_api.py llm_settings.py message_distributor.py tools/verify_guard.py
+
+NEW FRAGMENT END
+
+ADDITIONAL WORKFLOW REQUIREMENTS:
+
+1. Добавить chat_workspace.py, yj64_persistent_core.py и tests/**
+   в push.paths и pull_request.paths.
+2. Рабочая ветка должна запускать workflow на push; не ограничивать
+   запуск только main.
+3. Guard verification выполняется до regression tests и py_compile.
+4. При отсутствии tests/ или ошибке тестов workflow должен завершаться
+   с ошибкой, а не пропускать тестовый этап.
+5. Android Build в этом workflow не добавлять.
+
+---
+
+PATCH-ID: YJ64-PRIVATE-CHAT-OWNER-IDENTITY-001
+
+TARGET FILE: chat_workspace.py
+
+PURPOSE:
+
+Добавить стабильный owner_id и fail-closed проверку личного доступа.
+Этот patch обязателен до подключения private metadata к main.py.
+
+REQUIREMENTS:
+
+1. Сначала определить реальный источник устойчивой идентичности владельца
+   на Android и его поведение после очистки данных/переустановки.
+2. Нельзя считать случайный UUID в app-private storage устойчивым
+   после удаления данных: он может быть утрачен.
+3. Если Android identity API недоступен, не подменять владельца
+   молча новой случайной личностью при чтении старых private archives.
+   Возвращать состояние identity unavailable и запрещать private restore.
+4. owner_id и user_id — разные поля по смыслу; не использовать имя
+   модели/participant как user_id.
+5. Проверять requester_id на каждом чтении, изменении, экспорте
+   и восстановлении личной переписки.
+6. Не мигрировать старые histories автоматически в private/common,
+   пока принадлежность не подтверждена владельцем.
+7. Секреты идентичности не записывать в диагностический JSONL.
+
+ACCEPTANCE:
+
+Проверить обычный запуск, повторный запуск, очистку данных,
+переустановку, недоступность Android identity API и чужой requester.
+Не заявлять о защите от другого Android-пользователя без реальной
+криптографической/OS-level изоляции.
+
+---
+
+PATCH-ID: YJ64-PRIVATE-CHAT-RESTORE-001
+
+TARGET FILE: yj64_persistent_core.py
+
+PURPOSE:
+
+Описать и реализовать отдельное восстановление private ZIP с проверкой
+владельца до записи файлов в workspace.
+
+REQUIREMENTS:
+
+1. Сначала проверить ZIP структуру, manifest schema, SHA-256 и размеры.
+2. До извлечения проверить chat_id, owner_id, user_id,
+   visibility=private, chat_type=personal и requester_id.
+3. Запретить абсолютные пути, '..', symlink-like entries,
+   дублирующиеся имена и неожиданные файлы.
+4. Не извлекать архив напрямую поверх существующей истории.
+5. Сначала подготовить данные во временной директории, проверить
+   целостность и права, затем выполнить атомарную установку.
+6. При любой ошибке исходная история и ранее созданные архивы остаются
+   неизменными; временные файлы удаляются.
+7. Чужой/неизвестный owner_id означает отказ, а не импорт в common chat.
+8. Восстановление private ZIP не публикует сообщения в общий чат.
+
+ACCEPTANCE:
+
+Тесты на повреждённый ZIP, неверный SHA, traversal path, дубли имён,
+чужого владельца, существующий chat_id и сбой атомарной установки.
+После отказа сравнить SHA исходных файлов до/после.
+
+---
+
+СТАТУС ПОДГОТОВКИ ЭТАПА Q003-A:
+
+1. YJ64-PRIVATE-CHAT-ARCHIVE-001 — спецификация метаданных есть;
+   реализация ещё не перенесена.
+2. YJ64-PRIVATE-CHAT-ARCHIVE-002 — фильтр histories/ описан;
+   отдельный private ZIP exporter и restore должны быть реализованы
+   отдельными проверяемыми патчами.
+3. YJ64-PRIVATE-CHAT-ARCHIVE-003 — текущий NEW FRAGMENT содержит
+   поясняющие комментарии, а не исполняемую реализацию. Он НЕ готов
+   к переносу в main.py. Заменить его на конкретный кодовый фрагмент
+   после выбора owner identity и существующего MediaStore helper.
+4. YJ64-PRIVATE-CHAT-MAIN-IDENTITY-001, MAIN-OPEN-001,
+   MAIN-SAVE-001, MAIN-EXPORT-001 и MAIN-PUBLISH-001 должны быть
+   сверены с актуальным main.py отдельно; не считать их готовыми
+   только по наличию PATCH-ID.
+5. YJ64-PRIVATE-CHAT-REQUEST-001 — проверить точное место формирования
+   request_history и отдельную явную публикацию последнего обмена.
+6. MISTRAL-INPUT-NORMALIZE и TRANSIENT-503-RETRY — самостоятельные
+   задачи llm_api.py, не включать их в этап приватных архивов без
+   отдельного согласования.
+
+ПОРЯДОК ПЕРЕНОСА:
+
+A. Owner identity + metadata + fail-closed access.
+B. Private history read/write integration in main.py.
+C. Common archive exclusion without modifying old cumulative ZIPs.
+D. Separate private ZIP export through the existing verified MediaStore path.
+E. Private ZIP restore with path validation and atomic installation.
+F. Regression tests and CI.
+G. Guard verification, code review and only then separate decision on build.
+
+Ни один патч не считается готовым к переносу, пока его ORIGINAL FRAGMENT
+не совпадает с текущей веткой ровно один раз, NEW FRAGMENT является
+исполняемым кодом, а tests проверяют фактическое поведение.
+
+---
+
 ============================================================
 РАЗДЕЛ 5. КОНЕЦ ОПЕРАЦИОННОГО СТОЛА
 
