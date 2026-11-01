@@ -3779,6 +3779,284 @@ ACCEPTANCE:
 ---
 
 
+
+PATCH-ID: Q003-H-AUTO-ARCHIVE-PUBLISH-GATE-009
+
+TARGET FILE: main.py
+PATCH STATUS: EXACT SOURCE CAPTURED — GUARD ONLY; NOT TRANSFERRED
+
+PURPOSE:
+Защитить автоматический экспорт общего архива: сохранение текущей общей
+истории, чтение данных при сборке ZIP и публикацию ZIP в Download/YJ-64.
+Существующую проверку readback, SHA-256, ZIP integrity и удаление
+незавершённой MediaStore-записи сохранить без изменений.
+
+ORIGINAL FRAGMENT BEGIN
+    def _auto_export_download_archive(self, *_: Any) -> None:
+        """Create a verified archive in public Downloads/YJ-64 without opening a picker."""
+        temp_path = Path(self.user_data_dir) / "YJ-64-backup-auto.zip"
+        verify_path = Path(self.user_data_dir) / "YJ-64-backup-auto-verify.zip"
+        uri = None
+        try:
+            self._save_common_history()
+            # Собрать private chat records из histories/*.json и sidecar metadata.
+            # Неизвестные/неполные записи исключить из обоих типов экспорта.
+            # requester_id получить из стабильного локального owner identity.
+            # Для каждой записи проверить classify_chat и check_private_access.
+            # Создать отдельный временный ZIP на каждый разрешённый chat_id.
+            # Каждый личный ZIP опубликовать отдельной записью MediaStore
+            # в Download/YJ-64 и проверить readback так же, как общий ZIP.
+            self.persistent_core.export_archive(temp_path)
+            from jnius import autoclass
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            ContentValues = autoclass("android.content.ContentValues")
+            MediaStoreDownloads = autoclass("android.provider.MediaStore$Downloads")
+            resolver = PythonActivity.mActivity.getContentResolver()
+            stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+            values = ContentValues()
+            values.put("display_name", "YJ-64-backup-" + stamp + ".zip")
+            values.put("mime_type", "application/zip")
+            values.put("relative_path", "Download/YJ-64/")
+            values.put("is_pending", 1)
+            uri = resolver.insert(MediaStoreDownloads.EXTERNAL_CONTENT_URI, values)
+            if uri is None:
+                raise IOError("Android MediaStore did not create a Downloads file")
+            output = resolver.openOutputStream(uri)
+            if output is None:
+                raise IOError("Android could not open the Downloads archive for writing")
+            source_digest = hashlib.sha256(temp_path.read_bytes()).hexdigest()
+            copied = 0
+            try:
+                with temp_path.open("rb") as source:
+                    while True:
+                        chunk = source.read(65536)
+                        if not chunk:
+                            break
+                        for value_byte in chunk:
+                            output.write(value_byte)
+                        copied += len(chunk)
+                output.flush()
+            finally:
+                output.close()
+            expected = temp_path.stat().st_size
+            if copied != expected or copied <= 0:
+                raise IOError(f"Downloads archive size mismatch: {copied} of {expected} bytes")
+            readback = resolver.openInputStream(uri)
+            if readback is None:
+                raise IOError("Android could not reopen the Downloads archive")
+            read_count = 0
+            try:
+                with verify_path.open("wb") as verify_file:
+                    while True:
+                        value_byte = int(readback.read())
+                        if value_byte < 0:
+                            break
+                        verify_file.write(bytes((value_byte & 0xff,)))
+                        read_count += 1
+            finally:
+                readback.close()
+            import zipfile
+            read_digest = hashlib.sha256(verify_path.read_bytes()).hexdigest() if verify_path.is_file() else ""
+            if read_count != copied or read_digest != source_digest or not zipfile.is_zipfile(verify_path):
+                raise IOError("Downloads archive read-back, SHA-256 or ZIP integrity check failed")
+            with zipfile.ZipFile(verify_path, "r") as check_zip:
+                bad_member = check_zip.testzip()
+                if bad_member or "manifest.json" not in check_zip.namelist():
+                    raise IOError("Downloads archive is incomplete or has a corrupt member")
+            values_done = ContentValues()
+            values_done.put("is_pending", 0)
+            resolver.update(uri, values_done, None, None)
+            self._append_report("memory_archive_auto_download_succeeded",
+                                size_bytes=copied, readback_bytes=read_count,
+                                location="Download/YJ-64", zip_integrity_verified=True)
+            self._archive_auto_export_error = ""
+        except Exception as exc:
+            self._archive_auto_export_error = f"{type(exc).__name__}: {exc}"
+            self.status.text = (
+                "Автосохранение архива не удалось: "
+                + self._archive_auto_export_error
+            )
+            self._append_report(
+                "memory_archive_auto_download_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                location="Download/YJ-64",
+            )
+            if uri is not None:
+                try:
+                    from jnius import autoclass
+                    PythonActivity = autoclass("org.kivy.android.PythonActivity")
+                    PythonActivity.mActivity.getContentResolver().delete(
+                        uri, None, None
+                    )
+                except Exception:
+                    pass
+        finally:
+            temp_path.unlink(missing_ok=True)
+            verify_path.unlink(missing_ok=True)
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+    def _auto_export_download_archive(self, *_: Any) -> None:
+        """Create a verified archive in public Downloads/YJ-64 without opening a picker."""
+        temp_path = Path(self.user_data_dir) / "YJ-64-backup-auto.zip"
+        verify_path = Path(self.user_data_dir) / "YJ-64-backup-auto-verify.zip"
+        uri = None
+        publish_grant = None
+        try:
+            chat_id = str(self.current_chat_id)
+            common_write_grant = self.permission_manager.issue_grant(
+                actor_id=self.owner_id, subject_id=self.owner_id,
+                resource="common-chat:" + chat_id, action="write",
+                ttl_seconds=120, scope=chat_id,
+            )
+            try:
+                self.permission_manager.require(
+                    requester_id=self.owner_id,
+                    resource="common-chat:" + chat_id,
+                    action="write", scope=chat_id,
+                )
+                self._save_common_history()
+            finally:
+                self.permission_manager.revoke_grant(
+                    actor_id=self.owner_id, grant_id=common_write_grant
+                )
+            # Собрать private chat records из histories/*.json и sidecar metadata.
+            # Неизвестные/неполные записи исключить из обоих типов экспорта.
+            # requester_id получить из стабильного локального owner identity.
+            # Для каждой записи проверить classify_chat и check_private_access.
+            # Создать отдельный временный ZIP на каждый разрешённый chat_id.
+            # Каждый личный ZIP опубликовать отдельной записью MediaStore
+            # в Download/YJ-64 и проверить readback так же, как общий ZIP.
+            archive_read_grant = self.permission_manager.issue_grant(
+                actor_id=self.owner_id, subject_id=self.owner_id,
+                resource="common-archive", action="read",
+                ttl_seconds=120, scope="owner",
+            )
+            try:
+                self.permission_manager.require(
+                    requester_id=self.owner_id, resource="common-archive",
+                    action="read", scope="owner",
+                )
+                self.persistent_core.export_archive(temp_path)
+            finally:
+                self.permission_manager.revoke_grant(
+                    actor_id=self.owner_id, grant_id=archive_read_grant
+                )
+            from jnius import autoclass
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            ContentValues = autoclass("android.content.ContentValues")
+            MediaStoreDownloads = autoclass("android.provider.MediaStore$Downloads")
+            resolver = PythonActivity.mActivity.getContentResolver()
+            stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+            values = ContentValues()
+            values.put("display_name", "YJ-64-backup-" + stamp + ".zip")
+            values.put("mime_type", "application/zip")
+            values.put("relative_path", "Download/YJ-64/")
+            values.put("is_pending", 1)
+            publish_grant = self.permission_manager.issue_grant(
+                actor_id=self.owner_id, subject_id=self.owner_id,
+                resource="common-archive", action="publish",
+                ttl_seconds=180, scope="downloads",
+            )
+            self.permission_manager.require(
+                requester_id=self.owner_id, resource="common-archive",
+                action="publish", scope="downloads",
+            )
+            uri = resolver.insert(MediaStoreDownloads.EXTERNAL_CONTENT_URI, values)
+            if uri is None:
+                raise IOError("Android MediaStore did not create a Downloads file")
+            output = resolver.openOutputStream(uri)
+            if output is None:
+                raise IOError("Android could not open the Downloads archive for writing")
+            source_digest = hashlib.sha256(temp_path.read_bytes()).hexdigest()
+            copied = 0
+            try:
+                with temp_path.open("rb") as source:
+                    while True:
+                        chunk = source.read(65536)
+                        if not chunk:
+                            break
+                        for value_byte in chunk:
+                            output.write(value_byte)
+                        copied += len(chunk)
+                output.flush()
+            finally:
+                output.close()
+            expected = temp_path.stat().st_size
+            if copied != expected or copied <= 0:
+                raise IOError(f"Downloads archive size mismatch: {copied} of {expected} bytes")
+            readback = resolver.openInputStream(uri)
+            if readback is None:
+                raise IOError("Android could not reopen the Downloads archive")
+            read_count = 0
+            try:
+                with verify_path.open("wb") as verify_file:
+                    while True:
+                        value_byte = int(readback.read())
+                        if value_byte < 0:
+                            break
+                        verify_file.write(bytes((value_byte & 0xff,)))
+                        read_count += 1
+            finally:
+                readback.close()
+            import zipfile
+            read_digest = hashlib.sha256(verify_path.read_bytes()).hexdigest() if verify_path.is_file() else ""
+            if read_count != copied or read_digest != source_digest or not zipfile.is_zipfile(verify_path):
+                raise IOError("Downloads archive read-back, SHA-256 or ZIP integrity check failed")
+            with zipfile.ZipFile(verify_path, "r") as check_zip:
+                bad_member = check_zip.testzip()
+                if bad_member or "manifest.json" not in check_zip.namelist():
+                    raise IOError("Downloads archive is incomplete or has a corrupt member")
+            values_done = ContentValues()
+            values_done.put("is_pending", 0)
+            resolver.update(uri, values_done, None, None)
+            self._append_report("memory_archive_auto_download_succeeded",
+                                size_bytes=copied, readback_bytes=read_count,
+                                location="Download/YJ-64", zip_integrity_verified=True)
+            self._archive_auto_export_error = ""
+        except Exception as exc:
+            self._archive_auto_export_error = f"{type(exc).__name__}: {exc}"
+            self.status.text = (
+                "Автосохранение архива не удалось: "
+                + self._archive_auto_export_error
+            )
+            self._append_report(
+                "memory_archive_auto_download_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                location="Download/YJ-64",
+            )
+            if uri is not None:
+                try:
+                    from jnius import autoclass
+                    PythonActivity = autoclass("org.kivy.android.PythonActivity")
+                    PythonActivity.mActivity.getContentResolver().delete(
+                        uri, None, None
+                    )
+                except Exception:
+                    pass
+        finally:
+            if publish_grant:
+                self.permission_manager.revoke_grant(
+                    actor_id=self.owner_id, grant_id=publish_grant
+                )
+            temp_path.unlink(missing_ok=True)
+            verify_path.unlink(missing_ok=True)
+NEW FRAGMENT END
+
+ACCEPTANCE:
+- common-chat:<current_chat_id>/write до _save_common_history.
+- common-archive/read/owner до export_archive.
+- common-archive/publish/downloads до MediaStore insert и всей публикации.
+- Каждый grant отзывается при успехе и исключении.
+- При отказе публикации общий ZIP не становится видимым в Downloads.
+- Не экспортировать private histories в общий ZIP; старые ZIP не менять.
+- Переносить только после exact-match/SHA и тестов отказа до side effects.
+
+---
+
+
 РАЗДЕЛ 5. КОНЕЦ ОПЕРАЦИОННОГО СТОЛА
 
 Перед переносом каждого патча:
