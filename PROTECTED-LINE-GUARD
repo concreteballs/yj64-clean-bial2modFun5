@@ -2719,8 +2719,8 @@ NEW FRAGMENT BEGIN
             appendEvent("base_ipc_command_succeeded",
                 new JSONObject().put("command", command)
                     .put("request_id", requestId).toString());
-            status.setText("BASE IPC: " + command + "\\n"
-                + payload.toString(2) + "\\n\\n" + reportSummary());
+            status.setText("BASE IPC: " + command + "\n"
+                + payload.toString(2) + "\n\n" + reportSummary());
         } catch (Exception error) {
             appendEvent("base_ipc_command_failed",
                 new JSONObject().put("command", command)
@@ -2728,7 +2728,7 @@ NEW FRAGMENT BEGIN
                     .put("error_type", error.getClass().getSimpleName())
                     .put("message", String.valueOf(error.getMessage())).toString());
             status.setText("Base IPC failed: " + error.getClass().getSimpleName()
-                + "\\n" + String.valueOf(error.getMessage()) + "\\n\\n" + reportSummary());
+                + "\n" + String.valueOf(error.getMessage()) + "\n\n" + reportSummary());
         }
     }
 
