@@ -3388,7 +3388,7 @@ EXPECTED-GIT-BLOB-SHA:monitor-app/app/src/main/java/org/blackmirror/yj64monitor/
 EXPECTED-GIT-BLOB-SHA:monitor-app/app/src/main/AndroidManifest.xml=b3e810ff69c5d8c0723d0ee043c04b1fb984feb0
 EXPECTED-GIT-BLOB-SHA:monitor-app/app/src/main/java/org/blackmirror/yj64monitor/MonitorActivity.java=5cb703fd27dec970dc8f6eec1d2759cc3016ec32
 EXPECTED-GIT-BLOB-SHA:p4a/hook.py=8bd8773bf507df80868cf4e928f64cb76fce9df7
-EXPECTED-GIT-BLOB-SHA:.github/workflows/ci.yml=c98daaad25aef9a2edf572e806c6c84e8c7c2555
+EXPECTED-GIT-BLOB-SHA:.github/workflows/ci.yml=df02b8462b83c6b6b222b8e1042f9aef91fe2336
 EXPECTED-GIT-BLOB-SHA:.github/workflows/android-apk.yml=1171692879cbfb8dcd1ac2b64f8e21dfa280259e
 EXPECTED-GIT-BLOB-SHA:main.py=fbb2d3585452f94837842e314926fd7a70317667
 EXPECTED-GIT-BLOB-SHA:chat_workspace.py=729f67f0e2048e23c3136a9e468f009e713adba8
