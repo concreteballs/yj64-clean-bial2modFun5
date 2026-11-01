@@ -3205,6 +3205,28 @@ NEW FRAGMENT BEGIN
         self.context_manager = ContextManager(self.permission_manager, self.owner_id)
 NEW FRAGMENT END
 
+
+
+PATCH-ID: Q003-I-CI-DIAGNOSTIC-BRANCH-001
+
+TARGET FILE: .github/workflows/ci.yml
+
+PURPOSE:
+Разрешить CI-тестам автоматически запускаться только при push в текущую
+диагностическую ветку. main и прочие ветки не меняются.
+
+ORIGINAL FRAGMENT BEGIN
+on:
+  push:
+    branches: ['main']
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+on:
+  push:
+    branches: ['main', 'diagnostic/q003-write-path-probe-20261101']
+NEW FRAGMENT END
+
 РАЗДЕЛ 5. КОНЕЦ ОПЕРАЦИОННОГО СТОЛА
 
 Перед переносом каждого патча:
