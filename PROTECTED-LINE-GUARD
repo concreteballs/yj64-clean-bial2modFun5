@@ -3671,6 +3671,114 @@ ACCEPTANCE:
 ---
 
 
+
+PATCH-ID: Q003-H-COMMON-ARCHIVE-CREATE-GATE-008
+
+TARGET FILE: main.py
+PATCH STATUS: EXACT SOURCE CAPTURED — GUARD ONLY; NOT TRANSFERRED
+
+PURPOSE:
+Проверять право записи текущей общей истории до её сохранения и право
+чтения общего архива до формирования ZIP. Не меняет формат ZIP, manifest,
+инкрементальное слияние и механизм Android document picker.
+
+ORIGINAL FRAGMENT BEGIN
+    def _create_memory_archive(self, *_: Any) -> None:
+        """Create a portable ZIP then let Android's document picker save it outside app data."""
+        try:
+            self._save_common_history()
+            temp_path = Path(self.user_data_dir) / "YJ-64-backup.zip"
+            self.persistent_core.export_archive(temp_path)
+            from jnius import autoclass
+            Intent = autoclass("android.content.Intent")
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
+            intent.addCategory(Intent.CATEGORY_OPENABLE)
+            intent.setType("application/zip")
+            intent.putExtra(Intent.EXTRA_TITLE, "YJ-64-backup.zip")
+            self._archive_export_path = str(temp_path)
+            PythonActivity.mActivity.startActivityForResult(intent, 4701)
+            self.status.text = "Выбери папку для сохранения YJ-64-backup.zip."
+            self._append_report("memory_archive_export_picker_opened", archive_size=temp_path.stat().st_size)
+        except Exception as exc:
+            self.status.text = "Не удалось создать архив: " + str(exc)
+            self._append_report("memory_archive_export_failed", error=str(exc))
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+    def _create_memory_archive(self, *_: Any) -> None:
+        """Create a portable ZIP then let Android's document picker save it outside app data."""
+        try:
+            chat_id = str(self.current_chat_id)
+            common_write_grant = self.permission_manager.issue_grant(
+                actor_id=self.owner_id,
+                subject_id=self.owner_id,
+                resource="common-chat:" + chat_id,
+                action="write",
+                ttl_seconds=120,
+                scope=chat_id,
+            )
+            try:
+                self.permission_manager.require(
+                    requester_id=self.owner_id,
+                    resource="common-chat:" + chat_id,
+                    action="write",
+                    scope=chat_id,
+                )
+                self._save_common_history()
+            finally:
+                self.permission_manager.revoke_grant(
+                    actor_id=self.owner_id, grant_id=common_write_grant
+                )
+            archive_read_grant = self.permission_manager.issue_grant(
+                actor_id=self.owner_id,
+                subject_id=self.owner_id,
+                resource="common-archive",
+                action="read",
+                ttl_seconds=120,
+                scope="owner",
+            )
+            try:
+                self.permission_manager.require(
+                    requester_id=self.owner_id,
+                    resource="common-archive",
+                    action="read",
+                    scope="owner",
+                )
+                temp_path = Path(self.user_data_dir) / "YJ-64-backup.zip"
+                self.persistent_core.export_archive(temp_path)
+            finally:
+                self.permission_manager.revoke_grant(
+                    actor_id=self.owner_id, grant_id=archive_read_grant
+                )
+            from jnius import autoclass
+            Intent = autoclass("android.content.Intent")
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
+            intent.addCategory(Intent.CATEGORY_OPENABLE)
+            intent.setType("application/zip")
+            intent.putExtra(Intent.EXTRA_TITLE, "YJ-64-backup.zip")
+            self._archive_export_path = str(temp_path)
+            PythonActivity.mActivity.startActivityForResult(intent, 4701)
+            self.status.text = "Выбери папку для сохранения YJ-64-backup.zip."
+            self._append_report("memory_archive_export_picker_opened", archive_size=temp_path.stat().st_size)
+        except Exception as exc:
+            self.status.text = "Не удалось создать архив: " + str(exc)
+            self._append_report("memory_archive_export_failed", error=str(exc))
+NEW FRAGMENT END
+
+ACCEPTANCE:
+- common-chat:<current_chat_id>/write проверяется до _save_common_history.
+- common-archive/read/owner проверяется до export_archive.
+- Оба временных grant отзываются в finally.
+- При отказе ZIP не создаётся/не предлагается к сохранению.
+- Не добавлять private histories в общий архив; старые ZIP не сканировать
+  и не переписывать.
+- Переносить только после проверки exact-match и SHA.
+
+---
+
+
 РАЗДЕЛ 5. КОНЕЦ ОПЕРАЦИОННОГО СТОЛА
 
 Перед переносом каждого патча:
