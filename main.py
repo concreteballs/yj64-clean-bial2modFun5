@@ -241,7 +241,7 @@ class YJ64BaseApp(App):
         from system_chat import SystemChatStore
         self.system_chat_store = SystemChatStore(self.user_data_dir, self.owner_id)
         from context_manager import ContextManager
-        self.context_manager = ContextManager()
+        self.context_manager = ContextManager(self.permission_manager, self.owner_id)
         self._previous_excepthook = sys.excepthook
         sys.excepthook = self._handle_uncaught_exception
         self._previous_thread_excepthook = getattr(threading, "excepthook", None)
