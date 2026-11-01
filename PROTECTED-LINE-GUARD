@@ -2525,7 +2525,7 @@ ORIGINAL FRAGMENT BEGIN
 android.p4a_extra_args = --cflags="-Wno-error=implicit-function-declaration" --extra-manifest-xml="<queries><package android:name=\"org.blackmirror.yj64monitor\" /><provider android:authorities=\"org.blackmirror.yj64monitor.diagnostics\" /></queries>"
 ORIGINAL FRAGMENT END
 NEW FRAGMENT BEGIN
-android.p4a_extra_args = --cflags=\"-Wno-error=implicit-function-declaration\" --extra-manifest-xml=\"<permission android:name=\\\"org.blackmirror.blackmirror.permission.MONITOR_COMMAND\\\" android:protectionLevel=\\\"signature\\\" /><queries><package android:name=\\\"org.blackmirror.yj64monitor\\\" /><provider android:authorities=\\\"org.blackmirror.yj64monitor.diagnostics\\\" /></queries>\"
+android.p4a_extra_args = --cflags="-Wno-error=implicit-function-declaration" --extra-manifest-xml="<permission android:name=\"org.blackmirror.blackmirror.permission.MONITOR_COMMAND\" android:protectionLevel=\"signature\" /><queries><package android:name=\"org.blackmirror.yj64monitor\" /><provider android:authorities=\"org.blackmirror.yj64monitor.diagnostics\" /></queries>"
 NEW FRAGMENT END
 
 ---
@@ -2629,7 +2629,7 @@ def after_apk_build(toolchain: ToolchainCL) -> None:
         provider_xml = (
             f'    <provider android:name="{PROVIDER}" '
             f'android:authorities="{AUTHORITY}" android:exported="true" '
-            f'android:permission="{PERMISSION}" />\\n'
+            f'android:permission="{PERMISSION}" />\n'
         )
         close = text.rfind('</application>')
         if close < 0:
