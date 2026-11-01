@@ -40,7 +40,10 @@ class PersistentCore:
             elif base.is_dir() and not base.is_symlink():items=[p for p in base.rglob("*") if p.is_file() and not p.is_symlink()]
             else:items=[]
             for p in items:
-                name=p.relative_to(self.root).as_posix();data=p.read_bytes()
+                name=p.relative_to(self.root).as_posix()
+                if name.startswith("yj64-workspace/histories/"):
+                    continue
+                data=p.read_bytes()
                 result[name]=self._sanitize_json(data) if p.suffix.lower()==".json" else data
         for pattern in ("yj64-router-config.json","yj64-llm-config*.json"):
             for p in self.root.glob(pattern):
