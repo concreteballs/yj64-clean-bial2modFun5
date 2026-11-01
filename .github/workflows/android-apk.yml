@@ -1,10 +1,6 @@
 name: YJ-64 Base and Standalone Monitor Android APKs
 
 on:
-  push:
-    branches: ['main']
-    paths:
-      - 'PROTECTED-LINE-GUARD'
   workflow_dispatch:
 
 concurrency:
