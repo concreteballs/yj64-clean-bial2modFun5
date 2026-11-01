@@ -1338,9 +1338,11 @@ ACCEPTANCE:
     Текущий workflow запускается только на main и не включает тесты.
     Новый вариант обязан запускаться на push рабочей ветки и PR, при этом
     Guard verification должен оставаться первым проверочным шагом.
-14. YJ64-PRIVATE-CHAT-OWNER-IDENTITY-001 — SPECIFIED.
-    Точный insertion anchor ниже. Не использовать app-private random UUID
-    как устойчивую идентичность после очистки данных.
+14. YJ64-PRIVATE-CHAT-OWNER-IDENTITY-001 — DRAFT (перенесён частично).
+    В chat_workspace.py добавлен Android ANDROID_ID identity provider,
+    metadata sidecar и fail-closed private access primitives. Интеграция
+    с main.py и acceptance tests ещё не выполнены; не считать этап A
+    принятым. Точный insertion anchor ниже сохраняется для аудита.
 15. YJ64-PRIVATE-CHAT-RESTORE-001 — SPECIFIED.
     Точный insertion anchor ниже. Restore не должен распаковывать ZIP
     непосредственно в рабочую директорию.
@@ -1408,6 +1410,25 @@ main.py, chat_workspace.py, yj64_persistent_core.py, llm_api.py,
 buildozer.spec и workflow не изменять до отдельного этапа переноса.
 Исходная ветка work/private-chat-isolation-2026-11-01 остаётся
 контрольной точкой и не изменяется.
+
+ЖУРНАЛ ФАКТИЧЕСКОГО ПЕРЕНОСА
+
+COMMIT: f087f1aef19f5ef5bb73410a3a33f0d86b2ec719
+PATCH: YJ64-PRIVATE-CHAT-OWNER-IDENTITY-001 (частичный перенос)
+FILES: chat_workspace.py, PROTECTED-LINE-GUARD
+В chat_workspace.py добавлены:
+- Android Settings.Secure.ANDROID_ID provider с namespace + SHA-256;
+- явное состояние identity available/unavailable без случайного fallback;
+- создание private metadata только если history и sidecar ещё отсутствуют;
+- fail-closed metadata read, requester validation, private history read/write.
+ПРОВЕРЕНО: GitHub blob SHA синхронизирован с Guard; protected fragment
+совпадает ровно один раз; новые методы каждый присутствует ровно один раз.
+НЕ ВЫПОЛНЕНО: интеграция main.py, Android runtime acceptance после
+clear data/reinstall, unit tests, CI regression run. Старые histories
+не мигрировались и не классифицировались автоматически.
+СЛЕДУЮЩЕЕ УСЛОВИЕ: до этапа B написать/запустить тесты на identity
+unavailable, requester mismatch, legacy history без metadata и новую
+private history. Android Build не запускался.
 
 КРИТЕРИЙ ЗАВЕРШЕНИЯ ОПЕРАЦИОННОГО СТОЛА
 
