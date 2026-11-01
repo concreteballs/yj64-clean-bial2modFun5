@@ -3369,6 +3369,7 @@ ORIGINAL FRAGMENT END
 
 NEW FRAGMENT BEGIN
 
+        self.report_path = Path(self.user_data_dir) / REPORT_RELATIVE_PATH
         from yj64_persistent_core import PersistentCore
         self.persistent_core = PersistentCore(self.user_data_dir)
         from permission_manager import PermissionManager
@@ -3378,6 +3379,8 @@ NEW FRAGMENT BEGIN
         self.semantic_memory = SemanticMemory(self.user_data_dir)
         from system_chat import SystemChatStore
         self.system_chat_store = SystemChatStore(self.user_data_dir, self.owner_id)
+        from context_manager import ContextManager
+        self.context_manager = ContextManager()
 
 NEW FRAGMENT END
 
