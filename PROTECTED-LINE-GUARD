@@ -3561,6 +3561,116 @@ ACCEPTANCE:
 ---
 
 
+
+PATCH-ID: Q003-H-PRIVATE-EXCHANGE-PUBLISH-GATE-007
+
+TARGET FILE: main.py
+PATCH STATUS: EXACT SOURCE CAPTURED — GUARD ONLY; NOT TRANSFERRED
+
+PURPOSE:
+Защитить явную публикацию выбранного приватного обмена в текущий общий
+чат. Сначала проверяется common-chat write grant, затем сохраняется новый
+список сообщений; in-memory state обновляется только после успешной записи.
+
+ORIGINAL FRAGMENT BEGIN
+        def publish_last_exchange(*_args: Any) -> None:
+            exchange = last_exchange.get("messages")
+            if not exchange:
+                output.text += "\n\nNo completed private exchange to publish."
+                return
+            if last_exchange.get("published"):
+                output.text += "\n\nThis exchange was already published."
+                return
+            self.common_history.extend(exchange)
+            rendered = "\n\n".join(
+                f"{'Owner' if item['role'] == 'user' else participant_name}:\n{item['content']}"
+                for item in exchange
+            )
+            self.chat_output.text += f"\n\n[PUBLISHED FROM {participant_name} PRIVATE CHAT]\n{rendered}"
+            last_exchange["published"] = True
+            self._append_report(
+                "participant_private_exchange_published",
+                participant=participant_name,
+                route_id=route_id,
+                message_count=len(exchange),
+            )
+            self.status.text = f"Last private exchange from {participant_name} published to common chat."
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+        def publish_last_exchange(*_args: Any) -> None:
+            exchange = last_exchange.get("messages")
+            if not exchange:
+                output.text += "\n\nNo completed private exchange to publish."
+                return
+            if last_exchange.get("published"):
+                output.text += "\n\nThis exchange was already published."
+                return
+            publish_grant = None
+            try:
+                publish_grant = self.permission_manager.issue_grant(
+                    actor_id=self.owner_id,
+                    subject_id=self.owner_id,
+                    resource="common-chat:" + str(self.current_chat_id),
+                    action="write",
+                    ttl_seconds=120,
+                    scope=str(self.current_chat_id),
+                )
+                self.permission_manager.require(
+                    requester_id=self.owner_id,
+                    resource="common-chat:" + str(self.current_chat_id),
+                    action="write",
+                    scope=str(self.current_chat_id),
+                )
+                updated_common_history = list(self.common_history) + list(exchange)
+                self.workspace.save_messages(
+                    self.current_chat_id, updated_common_history
+                )
+                self.common_history = updated_common_history
+            except Exception as exc:
+                output.text += (
+                    f"\n\nPUBLISH DENIED: {type(exc).__name__}: {exc}"
+                )
+                self._append_report(
+                    "participant_private_exchange_publish_denied",
+                    participant=participant_name,
+                    route_id=route_id,
+                    error_type=type(exc).__name__,
+                )
+                return
+            finally:
+                if publish_grant:
+                    self.permission_manager.revoke_grant(
+                        actor_id=self.owner_id, grant_id=publish_grant
+                    )
+            rendered = "\n\n".join(
+                f"{'Owner' if item['role'] == 'user' else participant_name}:\n{item['content']}"
+                for item in exchange
+            )
+            self.chat_output.text += f"\n\n[PUBLISHED FROM {participant_name} PRIVATE CHAT]\n{rendered}"
+            last_exchange["published"] = True
+            self._append_report(
+                "participant_private_exchange_published",
+                participant=participant_name,
+                route_id=route_id,
+                message_count=len(exchange),
+            )
+            self.status.text = f"Last private exchange from {participant_name} published to common chat."
+NEW FRAGMENT END
+
+ACCEPTANCE:
+- Публикация возможна только через явное действие PUBLISH LAST EXCHANGE.
+- resource/action/scope точные: common-chat:<current_chat_id> / write /
+  <current_chat_id>.
+- Common history сохраняется на диск до обновления in-memory state.
+- При отказе common history и UI не публикуются; last_exchange.published
+  остаётся false.
+- Grant отзывается в finally; audit не содержит текста обмена.
+- Переносить только после проверки exact-match и SHA.
+
+---
+
+
 РАЗДЕЛ 5. КОНЕЦ ОПЕРАЦИОННОГО СТОЛА
 
 Перед переносом каждого патча:
