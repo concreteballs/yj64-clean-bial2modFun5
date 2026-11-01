@@ -2,7 +2,7 @@ name: YJ-64 Guard Validation
 
 on:
   push:
-    branches: ['main']
+    branches: ['main', 'diagnostic/q003-write-path-probe-20261101']
     paths:
       - 'PROTECTED-LINE-GUARD'
       - 'main.py'
