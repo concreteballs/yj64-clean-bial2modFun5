@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import time
 import uuid
@@ -109,6 +110,108 @@ class ChatWorkspace:
                 break
         if found:
             self._write_json(self.index_path, {"chats": chats})
+
+    @staticmethod
+    def _android_owner_identity() -> str | None:
+        """Return an app-scoped Android identity; never invent a replacement."""
+        try:
+            from jnius import autoclass
+
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            SettingsSecure = autoclass("android.provider.Settings$Secure")
+            activity = PythonActivity.mActivity
+            if activity is None:
+                return None
+            android_id = SettingsSecure.getString(
+                activity.getContentResolver(), SettingsSecure.ANDROID_ID
+            )
+            value = str(android_id or "").strip().lower()
+            if not value or value in {"9774d56d682e549c", "null", "unknown"}:
+                return None
+            return "android-owner-v1:" + hashlib.sha256(
+                ("yj64-owner-v1:" + value).encode("utf-8")
+            ).hexdigest()
+        except Exception:
+            return None
+
+    def get_local_owner_identity(self) -> dict[str, Any]:
+        """Expose identity availability without logging the identity itself."""
+        owner_id = self._android_owner_identity()
+        return {
+            "available": bool(owner_id),
+            "owner_id": owner_id,
+            "source": "android_id" if owner_id else None,
+        }
+
+    def _private_metadata_path(self, name: str) -> Path:
+        return self.histories_dir / (self._history_path(name).stem + ".meta.json")
+
+    @staticmethod
+    def _validate_requester(requester_id: str | None) -> str:
+        requester = str(requester_id or "").strip()
+        if not requester:
+            raise PermissionError("Private chat access denied: requester identity unavailable")
+        return requester
+
+    def load_private_chat_metadata(
+        self, name: str, *, requester_id: str
+    ) -> dict[str, Any]:
+        requester = self._validate_requester(requester_id)
+        data = self._read_json(self._private_metadata_path(name), None)
+        if not isinstance(data, dict):
+            raise PermissionError("Private chat access denied: metadata missing or invalid")
+        required = ("chat_id", "visibility", "chat_type", "owner_id", "user_id")
+        if any(not str(data.get(key) or "").strip() for key in required):
+            raise PermissionError("Private chat access denied: incomplete metadata")
+        if data.get("visibility") != "private" or data.get("chat_type") != "personal":
+            raise PermissionError("Private chat access denied: not a private personal chat")
+        if requester not in {str(data["owner_id"]), str(data["user_id"])}:
+            raise PermissionError("Private chat access denied: requester does not own this chat")
+        return data
+
+    def create_private_chat_metadata(
+        self, name: str, *, chat_id: str, owner_id: str, user_id: str
+    ) -> dict[str, Any]:
+        """Create metadata only for a genuinely new history, never classify legacy data."""
+        values = {
+            "chat_id": str(chat_id or "").strip(),
+            "visibility": "private",
+            "chat_type": "personal",
+            "owner_id": str(owner_id or "").strip(),
+            "user_id": str(user_id or "").strip(),
+        }
+        if not all(values[key] for key in ("chat_id", "owner_id", "user_id")):
+            raise ValueError("Private chat identity fields must not be empty")
+        history_path = self._history_path(name)
+        metadata_path = self._private_metadata_path(name)
+        if history_path.exists() or metadata_path.exists():
+            raise FileExistsError("Existing/legacy history cannot be silently classified as private")
+        self._write_json(metadata_path, values)
+        return values
+
+    def save_private_named_history(
+        self, name: str, history: list[dict[str, Any]], *, requester_id: str
+    ) -> None:
+        self.load_private_chat_metadata(name, requester_id=requester_id)
+        normalized = [
+            self._normalize_message(item)
+            for item in history
+            if isinstance(item, dict)
+        ]
+        self._write_json(self._history_path(name), normalized)
+
+    def load_private_named_history(
+        self, name: str, *, requester_id: str
+    ) -> list[dict[str, Any]]:
+        self.load_private_chat_metadata(name, requester_id=requester_id)
+        data = self._read_json(self._history_path(name), None)
+        if not isinstance(data, list):
+            raise ValueError("Private chat history is missing or invalid")
+        return [
+            self._normalize_message(item)
+            for item in data
+            if isinstance(item, dict)
+        ]
 
     def _history_path(self, name: str) -> Path:
         key = "".join(c for c in str(name) if c.isalnum() or c in "-_ ").strip().replace(" ", "_")
