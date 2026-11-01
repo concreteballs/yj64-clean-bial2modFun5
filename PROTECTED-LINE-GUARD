@@ -1126,34 +1126,41 @@ ABSENT — tests/test_private_chat_archives.py отсутствует в исх�
 
 NEW FILE REQUIREMENTS:
 
-1. Legacy history без sidecar metadata:
-   - не считается common;
-   - не включается в общий ZIP;
-   - не экспортируется как private ZIP без подтверждённого владельца;
-   - исходный JSON и сообщения остаются без изменений.
-2. Private metadata с корректными chat_id, owner_id, user_id,
-   visibility=private и chat_type=personal:
-   - доступна только разрешённому requester;
-   - чужой requester получает PermissionError/deny;
-   - пустой requester всегда получает deny.
-3. Два разных private chat_id создают два отдельных ZIP.
+A. OWNER IDENTITY / FAIL-CLOSED (обязательно):
+1. Подменённый requester_id не обходит trusted owner identity provider.
+2. Недоступный/ошибочный/placeholder provider блокирует private create/read/write.
+3. Создание metadata не принимает произвольный owner_id от caller.
+4. Чужой owner, пустая identity и invalid metadata дают deny.
+5. Legacy history без metadata не классифицируется, не экспортируется
+   как private и остаётся побайтно неизменной.
+6. Корректный trusted owner может создать, прочитать и сохранить private data.
+7. Смена identity provider не вызывает автоматическую миграцию или
+   создание новой личности.
+
+B. ARCHIVE ISOLATION:
+8. Два разных private chat_id создают два отдельных ZIP.
    Содержимое одного ZIP не содержит сообщений другого.
-4. Каждый private ZIP имеет manifest и SHA-256 для каждого payload-файла.
+9. Каждый private ZIP имеет manifest и SHA-256 для каждого payload-файла.
    Проверяются zip.testzip(), размеры и контрольные суммы.
-5. Общий накопительный ZIP не содержит ни histories/*.json,
-   ни histories/*.meta.json, ни других файлов из histories/.
-6. Проверить повторный экспорт: ранее созданный ZIP не перезаписывается.
-7. Проверить повреждённый JSON/metadata: экспорт завершается безопасным
-   отказом, исходные файлы не удаляются и не исправляются молча.
-8. Проверить, что private archive export не объявляет ZIP зашифрованным.
-9. Проверить сохранность текущего накопительного общего архива:
-   manifest, SHA-256, atomic replace и старые накопленные ZIP не меняются.
+10. Общий накопительный ZIP не содержит ни histories/*.json,
+    ни histories/*.meta.json, ни других файлов из histories/.
+11. Повторный экспорт не перезаписывает ранее созданный ZIP.
+12. Повреждённый JSON/metadata: экспорт завершается безопасным отказом,
+    исходные файлы не удаляются и не исправляются молча.
+13. Private archive export не объявляет ZIP зашифрованным.
+14. Существующий накопительный общий архив сохраняет manifest, SHA-256,
+    atomic replace; старые накопленные ZIP не сканируются и не переписываются.
 
 NEW FILE TEST CASES (минимум):
 
-- test_legacy_history_is_not_classified_or_exported
-- test_private_access_requires_matching_owner_or_user
-- test_empty_and_foreign_requester_are_denied
+- test_private_operations_fail_closed_when_identity_unavailable
+- test_caller_supplied_requester_cannot_impersonate_owner
+- test_metadata_creation_rejects_caller_supplied_owner
+- test_foreign_owner_and_empty_identity_are_denied
+- test_invalid_or_missing_metadata_is_denied
+- test_legacy_history_is_not_classified_or_modified
+- test_trusted_owner_can_create_read_and_write_private_history
+- test_identity_change_does_not_auto_migrate_private_data
 - test_two_private_chat_ids_produce_separate_archives
 - test_private_archive_manifest_and_sha256_are_verified
 - test_common_archive_excludes_histories_and_sidecars
@@ -1167,7 +1174,9 @@ ACCEPTANCE:
 python3 -m unittest discover -s tests -p 'test_private_chat_archives.py' -v
 
 Не использовать фиктивные заглушки вместо вызова реальных методов
-ChatWorkspace/PersistentCore. Тестировать фактический результат ZIP.
+ChatWorkspace/PersistentCore. Для owner identity допускается управляемый
+test provider, но он должен проходить через тот же private authorization
+path, что и production provider. Тестировать фактический результат ZIP.
 
 ---
 
@@ -1218,32 +1227,70 @@ TARGET FILE: chat_workspace.py
 
 PURPOSE:
 
-Добавить стабильный owner_id и fail-closed проверку личного доступа.
-Этот patch обязателен до подключения private metadata к main.py.
+Исправить owner identity и закрыть все private operations по принципу
+fail-closed. Текущая частичная реализация НЕ является защитой:
+caller-supplied requester_id можно подменить, а owner_id/user_id при
+создании metadata принимаются от вызывающего кода без проверки.
 
 REQUIREMENTS:
 
-1. Сначала определить реальный источник устойчивой идентичности владельца
-   на Android и его поведение после очистки данных/переустановки.
-2. Нельзя считать случайный UUID в app-private storage устойчивым
-   после удаления данных: он может быть утрачен.
-3. Если Android identity API недоступен, не подменять владельца
-   молча новой случайной личностью при чтении старых private archives.
-   Возвращать состояние identity unavailable и запрещать private restore.
-4. owner_id и user_id — разные поля по смыслу; не использовать имя
-   модели/participant как user_id.
-5. Проверять requester_id на каждом чтении, изменении, экспорте
-   и восстановлении личной переписки.
-6. Не мигрировать старые histories автоматически в private/common,
-   пока принадлежность не подтверждена владельцем.
-7. Секреты идентичности не записывать в диагностический JSONL.
+1. Определить и документировать фактический Android identity provider,
+   включая область действия ANDROID_ID, ограничения после очистки данных,
+   переустановки, смены signing key, профиля и factory reset.
+   Не обещать неизменность Android ID при всех этих операциях.
+2. Единственный доверенный owner identity для локального private storage
+   должен вычисляться внутри ChatWorkspace через provider. Публичные
+   private methods не должны принимать owner_id от caller как доказательство
+   полномочий.
+3. Каждая private операция сама получает текущий trusted owner identity
+   и сравнивает его с metadata.owner_id. Caller не может передать произвольный
+   requester_id, чтобы выдать себя за владельца.
+4. Если identity provider недоступен, пуст, возвращает placeholder или
+   завершается ошибкой, private create/read/write/export/restore запрещены.
+   Никакого random UUID fallback и никакого автоматического создания
+   новой личности при чтении существующего private data.
+5. owner_id и user_id имеют разные смыслы. user_id принимается только из
+   подтверждённого источника идентичности пользователя, если такой источник
+   реально существует. Не подменять его owner_id, именем модели,
+   participant_id или произвольной строкой.
+6. Если подтверждённого user identity provider в приложении нет, не выдавать
+   фиктивный user_id за аутентификацию. До определения продуктовой семантики
+   доступ ограничивается локальным owner identity, а поле user_id должно
+   иметь явно документированную семантику и проверку.
+7. Создание metadata должно само получать owner_id из trusted provider.
+   Нельзя разрешать вызывающему коду произвольно указать owner_id.
+   Создание не должно перезаписывать существующую history или metadata.
+8. Чтение, запись, изменение metadata, экспорт и восстановление проверяют
+   полномочия непосредственно перед операцией. Не доверять ранее
+   проверенному requester или сохранённому UI состоянию.
+9. Missing/invalid metadata, несовпадающий chat_id, неизвестная схема,
+   legacy history без metadata и несоответствие owner означают deny.
+   Не классифицировать и не исправлять legacy data автоматически.
+10. Не записывать raw Android ID, owner_id, user_id или иные секреты
+    идентичности в диагностический JSONL.
+11. Добавить injection/mock seam для тестирования identity provider,
+    если это необходимо; тестовый provider не должен включаться в
+    production по умолчанию.
 
 ACCEPTANCE:
 
-Проверить обычный запуск, повторный запуск, очистку данных,
-переустановку, недоступность Android identity API и чужой requester.
+Обязательные тесты проверяют не только identity helper, но реальные
+private create/read/write operations:
+
+- provider unavailable / exception / placeholder => create/read/write deny;
+- произвольный requester_id не позволяет обойти trusted owner check;
+- произвольный owner_id при создании metadata отклоняется;
+- чужой owner и пустая identity => deny;
+- metadata отсутствует, повреждена, имеет неверный chat_id/schema => deny;
+- legacy history без metadata не классифицируется и не изменяется;
+- корректный trusted owner может создать, прочитать и сохранить private data;
+- повторный запуск с тем же provider сохраняет доступ;
+- смена identity provider приводит к deny, а не к автоматической миграции;
+- raw identity values отсутствуют в диагностических событиях.
+
 Не заявлять о защите от другого Android-пользователя без реальной
-криптографической/OS-level изоляции.
+криптографической/OS-level изоляции. Не считать Android ID вечным
+или универсальным идентификатором владельца.
 
 ---
 
@@ -1448,8 +1495,11 @@ private history. Android Build не запускался.
 
 СТАТУС ПОДГОТОВКИ ЭТАПА Q003-A:
 
-1. YJ64-PRIVATE-CHAT-ARCHIVE-001 — спецификация метаданных есть;
-   реализация ещё не перенесена.
+1. YJ64-PRIVATE-CHAT-ARCHIVE-001 — частичные helper-методы уже присутствуют
+   в chat_workspace.py, но их авторизация небезопасна: requester_id и
+   owner_id можно подменить со стороны caller. Этап A НЕ завершён;
+   private call sites не подключать до исправления OWNER-IDENTITY-001
+   и прохождения acceptance tests.
 2. YJ64-PRIVATE-CHAT-ARCHIVE-002 — фильтр histories/ описан;
    отдельный private ZIP exporter и restore должны быть реализованы
    отдельными проверяемыми патчами.
