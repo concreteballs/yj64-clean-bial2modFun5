@@ -92,6 +92,9 @@ public class MonitorActivity extends Activity {
         root.addView(status, new LinearLayout.LayoutParams(-1, 0, 1));
 
         addButton(root, "LAUNCH YJ-64", v -> launchBase());
+        addButton(root, "CHECK BASE STATUS", v -> callBaseCommand("get_status"));
+        addButton(root, "FLUSH BASE REPORT", v -> callBaseCommand("request_report_flush"));
+        addButton(root, "BASE DIAGNOSTIC SNAPSHOT", v -> callBaseCommand("request_diagnostic_snapshot"));
         addButton(root, "REFRESH CRASH REPORT", v -> refreshDiagnostics());
         addButton(root, "COPY DIAGNOSTIC REPORT", v -> copyReport());
         addButton(root, "CONFIGURE GITHUB UPLOAD", v -> configureToken());
