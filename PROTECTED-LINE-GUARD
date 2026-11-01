@@ -3227,6 +3227,133 @@ on:
     branches: ['main', 'diagnostic/q003-write-path-probe-20261101']
 NEW FRAGMENT END
 
+PATCH-ID: Q003-H-PRIVATE-CHAT-READ-GATE-003
+
+TARGET FILE: main.py
+PATCH STATUS: EXACT SOURCE CAPTURED — READY FOR TRANSFER
+
+PURPOSE:
+Создать стабильную идентичность приватного чата, проверить владельца
+и выполнить одноразовую read-проверку до загрузки приватной истории.
+Разрешение создаётся только в ответ на открытие пользователем приватного
+чата и немедленно отзывается после чтения.
+
+ORIGINAL FRAGMENT BEGIN
+        history = self.private_histories.setdefault(
+            participant_name, self.workspace.load_named_history(participant_name)
+        )
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+        private_chat_id = hashlib.sha256(
+            f"yj64-private-chat:{self.owner_id}:{route_id}".encode("utf-8")
+        ).hexdigest()[:32]
+        metadata = self.workspace.load_private_chat_metadata(participant_name)
+        metadata_path = self.workspace._private_metadata_path(participant_name)
+        if metadata is None:
+            if metadata_path.exists():
+                raise IOError("Private chat metadata is invalid; refusing access")
+            self.workspace.save_private_chat_metadata(
+                participant_name,
+                chat_id=private_chat_id,
+                owner_id=self.owner_id,
+                user_id=self.owner_id,
+            )
+            metadata = self.workspace.load_private_chat_metadata(participant_name)
+        if (
+            metadata is None
+            or metadata.get("owner_id") != self.owner_id
+            or metadata.get("user_id") != self.owner_id
+            or not metadata.get("chat_id")
+        ):
+            raise PermissionError("Private chat identity does not match this owner")
+        private_chat_id = str(metadata["chat_id"])
+        read_grant = self.permission_manager.issue_grant(
+            actor_id=self.owner_id,
+            subject_id=self.owner_id,
+            resource="private-chat:" + private_chat_id,
+            action="read",
+            ttl_seconds=120,
+            scope=private_chat_id,
+        )
+        try:
+            self.permission_manager.require(
+                requester_id=self.owner_id,
+                resource="private-chat:" + private_chat_id,
+                action="read",
+                scope=private_chat_id,
+            )
+            history = self.private_histories.setdefault(
+                participant_name, self.workspace.load_named_history(participant_name)
+            )
+        finally:
+            self.permission_manager.revoke_grant(
+                actor_id=self.owner_id, grant_id=read_grant
+            )
+NEW FRAGMENT END
+
+ACCEPTANCE:
+- Невалидные metadata не перезаписываются.
+- owner_id/user_id должны совпадать с локальным owner identity.
+- PermissionManager require выполняется до load_named_history.
+- Grant ограничен 120 секундами и отзывается в finally.
+
+---
+
+PATCH-ID: Q003-H-PRIVATE-CONTEXT-ROUTING-004
+
+TARGET FILE: main.py
+PATCH STATUS: EXACT SOURCE CAPTURED — READY FOR TRANSFER
+
+PURPOSE:
+Построить контекст приватного запроса только через ContextManager
+с private scope и chat_id. Common history не передаётся.
+
+ORIGINAL FRAGMENT BEGIN
+            private_context = list(self.private_histories.get(participant_name, []))
+            request_message = self._practical_instructions(message)
+            request_history = private_context + [
+                {"role": "user", "content": request_message}
+            ]
+ORIGINAL FRAGMENT END
+
+NEW FRAGMENT BEGIN
+            private_context = list(self.private_histories.get(participant_name, []))
+            request_message = self._practical_instructions(message)
+            request_grant = self.permission_manager.issue_grant(
+                actor_id=self.owner_id,
+                subject_id=self.owner_id,
+                resource="private-chat:" + private_chat_id,
+                action="read",
+                ttl_seconds=120,
+                scope=private_chat_id,
+            )
+            try:
+                request_context = self.context_manager.build(
+                    route_id=route_id,
+                    mode="full_history",
+                    scope="private",
+                    requester_id=self.owner_id,
+                    chat_id=private_chat_id,
+                    private_history=private_context + [
+                        {"role": "user", "content": request_message}
+                    ],
+                )
+                request_history = request_context["messages"]
+            finally:
+                self.permission_manager.revoke_grant(
+                    actor_id=self.owner_id, grant_id=request_grant
+                )
+NEW FRAGMENT END
+
+ACCEPTANCE:
+- ContextManager проверяет permission grant.
+- История ограничена текущим приватным чатом.
+- Grant отзывается сразу после сборки request context.
+- Никакого fallback к common_history нет.
+
+---
+
 РАЗДЕЛ 5. КОНЕЦ ОПЕРАЦИОННОГО СТОЛА
 
 Перед переносом каждого патча:
