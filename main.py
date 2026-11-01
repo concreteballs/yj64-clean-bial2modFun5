@@ -1918,9 +1918,51 @@ class YJ64BaseApp(App):
             model=status["model"],
         )
 
-        history = self.private_histories.setdefault(
-            participant_name, self.workspace.load_named_history(participant_name)
+        private_chat_id = hashlib.sha256(
+            f"yj64-private-chat:{self.owner_id}:{route_id}".encode("utf-8")
+        ).hexdigest()[:32]
+        metadata = self.workspace.load_private_chat_metadata(participant_name)
+        metadata_path = self.workspace._private_metadata_path(participant_name)
+        if metadata is None:
+            if metadata_path.exists():
+                raise IOError("Private chat metadata is invalid; refusing access")
+            self.workspace.save_private_chat_metadata(
+                participant_name,
+                chat_id=private_chat_id,
+                owner_id=self.owner_id,
+                user_id=self.owner_id,
+            )
+            metadata = self.workspace.load_private_chat_metadata(participant_name)
+        if (
+            metadata is None
+            or metadata.get("owner_id") != self.owner_id
+            or metadata.get("user_id") != self.owner_id
+            or not metadata.get("chat_id")
+        ):
+            raise PermissionError("Private chat identity does not match this owner")
+        private_chat_id = str(metadata["chat_id"])
+        read_grant = self.permission_manager.issue_grant(
+            actor_id=self.owner_id,
+            subject_id=self.owner_id,
+            resource="private-chat:" + private_chat_id,
+            action="read",
+            ttl_seconds=120,
+            scope=private_chat_id,
         )
+        try:
+            self.permission_manager.require(
+                requester_id=self.owner_id,
+                resource="private-chat:" + private_chat_id,
+                action="read",
+                scope=private_chat_id,
+            )
+            history = self.private_histories.setdefault(
+                participant_name, self.workspace.load_named_history(participant_name)
+            )
+        finally:
+            self.permission_manager.revoke_grant(
+                actor_id=self.owner_id, grant_id=read_grant
+            )
         output_lines = [
             f"{'You' if item.get('role') == 'user' else participant_name}:\n{item.get('content', '')}"
             for item in history
@@ -1999,9 +2041,42 @@ class YJ64BaseApp(App):
             output.text += f"\n\nYou: {message}\n\nSending privately..."
             private_context = list(self.private_histories.get(participant_name, []))
             request_message = self._practical_instructions(message)
-            request_history = private_context + [
-                {"role": "user", "content": request_message}
-            ]
+            request_grant = None
+            try:
+                request_grant = self.permission_manager.issue_grant(
+                    actor_id=self.owner_id,
+                    subject_id=self.owner_id,
+                    resource="private-chat:" + private_chat_id,
+                    action="read",
+                    ttl_seconds=120,
+                    scope=private_chat_id,
+                )
+                request_context = self.context_manager.build(
+                    route_id=route_id,
+                    mode="full_history",
+                    scope="private",
+                    requester_id=self.owner_id,
+                    chat_id=private_chat_id,
+                    private_history=private_context + [
+                        {"role": "user", "content": request_message}
+                    ],
+                )
+                request_history = request_context["messages"]
+            except Exception as exc:
+                send.disabled = False
+                output.text += f"\\n\\nPRIVATE ACCESS DENIED: {type(exc).__name__}: {exc}"
+                self._append_report(
+                    "participant_private_context_denied",
+                    participant=participant_name,
+                    route_id=route_id,
+                    error_type=type(exc).__name__,
+                )
+                return
+            finally:
+                if request_grant:
+                    self.permission_manager.revoke_grant(
+                        actor_id=self.owner_id, grant_id=request_grant
+                    )
             self._append_report(
                 "participant_request_started",
                 participant=participant_name,
