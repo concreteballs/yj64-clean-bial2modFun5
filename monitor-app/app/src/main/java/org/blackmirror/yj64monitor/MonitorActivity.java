@@ -52,8 +52,8 @@ import javax.crypto.spec.GCMParameterSpec;
 public class MonitorActivity extends Activity {
     private static final String TARGET_PACKAGE = "org.blackmirror.blackmirror";
     private static final String OWNER = "concreteballs";
-    private static final String REPO = "yj64-clean-bial2modFun";
-    private static final String BRANCH = "main";
+    private static final String REPO = "yj64-clean-bial2modFun5";
+    private static final String BRANCH = "test/build-diagnostic-2026-10-31";
     private static final String REPORT_PATH = "yj64-reports/yj64-report.jsonl";
     private static final String KEY_ALIAS = "yj64_standalone_monitor_github_key";
     private static final String TOKEN_FILE = "yj64-github-token.enc";
@@ -64,14 +64,6 @@ public class MonitorActivity extends Activity {
         appendEvent("monitor_started", "{\"package\":\"" + TARGET_PACKAGE + "\"}");
         buildUi();
         refreshDiagnostics();
-        autoUploadReportIfConfigured();
-    }
-
-    private void autoUploadReportIfConfigured() {
-        if (!tokenFile().isFile()) return;
-        appendEvent("diagnostic_report_auto_upload_started",
-            "{\"trigger\":\"monitor_opened\",\"repository\":\"" + OWNER + "/" + REPO + "\",\"branch\":\"" + BRANCH + "\",\"path\":\"Report\"}");
-        uploadReport();
     }
 
     private void buildUi() {
