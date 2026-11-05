@@ -105,57 +105,14 @@ END ALLOWED
 ============================================================
 РАЗДЕЛ 4. ОПЕРАЦИОННЫЙ СТОЛ
 
-СТАТУС: 1 НЕЗАВЕРШЁННЫЙ PATCH — ОСТАЛИСЬ ТОЛЬКО НЕЗАВЕРШЁННЫЕ ТРЕБОВАНИЯ
+СТАТУС: CLEAN — НЕТ АКТИВНЫХ ПАТЧЕЙ.
 
-PATCH-ID: YJ64-PRIVATE-CHAT-ARCHIVE-001
+На операционном столе нет незавершённых изменений.
+Новые изменения помещаются сюда только после отдельного согласования
+и копирования точных исходных фрагментов из рабочих файлов.
 
-TARGET FILES:
-- main.py
-- yj64_persistent_core.py
-- Android runtime / private archive publication
-
-ОСТАВШИЕСЯ ТРЕБОВАНИЯ:
-
-1. Объединить создание общего и личных архивов в один пользовательский
-   запуск. Сейчас автоматическая кнопка публикует только общий ZIP;
-   личный экспорт запускается отдельным действием.
-
-2. Определить и реализовать конечный формат личных архивов:
-   текущая реализация формирует отдельные ZIP по участникам, но UI
-   собирает их в один зашифрованный bundle и сохраняет через SAF.
-   Требуется согласовать, как обеспечить отдельность архивов,
-   шифрование и общий целевой каталог Download/YJ-64 без plaintext
-   публикации личных данных.
-
-3. Проверить сопоставление runner / participant_id с именами файлов
-   историй. Не считать группировку корректной для всех вариантов
-   runner, пока не пройдена отдельная проверка.
-
-4. Проверить реальную Android-реализацию PrivateArchiveCrypto:
-   наличие и работу AES-256-GCM / PBKDF2, экспорт, импорт и обработку
-   неверной парольной фразы. Python-код вызывает Java-класс, но его
-   исходник и работа на устройстве здесь не подтверждены.
-
-5. Проверить Android runtime: публикацию всех требуемых архивов,
-   чтение сохранённых файлов обратно, целостность, видимость в
-   файловом менеджере и раздельную отчётность при частичном сбое.
-
-6. Проверить границы доступа. В запрос модели передаётся её собственная
-   личная история, но отдельный requester-level API с явной проверкой
-   read/write прав для owner / participant / monitor пока не подтверждён.
-
-7. После завершения — добавить недостающие регрессионные проверки,
-   обновить контрольные SHA и выполнить Guard Validation.
-   Android Build не запускать до Guard PASS.
-
-ПРИМЕЧАНИЕ:
-Уже реализованные механизмы общего архива, исключения histories и
-private_messages, отдельного ZIP-экспорта, проверки ZIP/manifest/hash,
-отдельного private bundle import с проверкой схемы и participant identity,
-а также нормализации метаданных сообщений повторно в этот список
-не включать. Их реализация и ограничения зафиксированы в
-IMPLEMENTATION RECORD ниже. Это не означает, что Android runtime
-проверен или что весь PATCH завершён.
+Нерешённые задачи и порядок их выполнения находятся в очереди
+в последнем разделе этого файла.
 
 ============================================================
 
@@ -175,13 +132,11 @@ IMPLEMENTATION RECORD ниже. Это не означает, что Android run
 ============================================================
 РАЗДЕЛ 6. ОЧЕРЕДЬ ЗАДАЧ
 
-СТАТУС: EMPTY
-ОТЛОЖЕННЫХ ЗАДАЧ НЕТ.
-
-Задачи добавляются сюда только по отдельному указанию владельца.
-Запись в очереди фиксирует намерение, но не даёт разрешения на изменение.
+Очередь перенесена в последний раздел файла, после всех implementation
+records и контрольных данных. См. «ФИНАЛЬНАЯ ОЧЕРЕДЬ РЕШЕНИЯ ЗАДАЧ».
 
 ============================================================
+
 РАЗДЕЛ 7. КОНТРОЛЬНЫЕ ДАННЫЕ РАБОЧИХ ФАЙЛОВ
 
 Контрольные значения — Git blob SHA-1.
@@ -241,220 +196,6 @@ ACCEPTANCE CHECKS REQUIRED:
 - Verify missing remote_participant import opens error popup and app remains usable.
 
 STATUS: IMPLEMENTED IN WORKING FILES; VALIDATION PENDING.
-============================================================
-
-============================================================
-PATCH IMPLEMENTATION TABLE — YJ64-PRIVATE-CHAT-ARCHIVE-001
-STATUS: IMPLEMENTATION IN PROGRESS — OWNER APPROVAL RECEIVED 2026-10-31
-TARGET: yj64_persistent_core.py; main.py; chat_workspace.py
-
-ORIGINAL FRAGMENTS — EXACT COPIES FROM WORKING FILES
-
-FILE: yj64_persistent_core.py — _collect_files()
-```python
-        if isinstance(value,dict):return {k:cls._sanitize(v) for k,v in value.items() if str(k).lower() not in cls.SECRET_KEYS}
-        if isinstance(value,list):return [cls._sanitize(x) for x in value]
-        return value
-    @classmethod
-    def _sanitize_json(cls,payload:bytes)->bytes:
-        try:data=json.loads(payload.decode("utf-8"))
-        except (UnicodeDecodeError,json.JSONDecodeError):return payload
-        return json.dumps(cls._sanitize(data),ensure_ascii=False,indent=2).encode("utf-8")
-    def _collect_files(self)->dict[str,bytes]:
-        result={}
-        for base in (self.workspace_path,self.report_path):
-            if base.is_file() and not base.is_symlink():items=[base]
-            elif base.is_dir() and not base.is_symlink():items=[p for p in base.rglob("*") if p.is_file() and not p.is_symlink()]
-```
-
-FILE: yj64_persistent_core.py — export_archive()
-```python
-    def export_archive(self,destination:str|Path)->Path:
-        dest=Path(destination);dest.parent.mkdir(parents=True,exist_ok=True);tmp=dest.with_suffix(dest.suffix+".tmp");state_tmp=self.archive_state_path.with_suffix(".zip.tmp")
-        previous,old_manifest=self._read_previous();merged=dict(previous);current=self._collect_files()
-        for name,data in current.items():
-            if name.startswith("yj64-workspace/chats/") and name.endswith(".json") and name in merged:data=self._merge_history(merged[name],data)
-            merged[name]=data
-        idx="yj64-workspace/chats.json"
-        if idx not in merged:raise IOError("Archive cannot be created: chat index missing")
-        try:index=json.loads(merged[idx].decode("utf-8"));chats=index.get("chats",[]) if isinstance(index,dict) else []
-        except (UnicodeDecodeError,json.JSONDecodeError,AttributeError) as exc:raise IOError("Invalid archive chat index") from exc
-        if not isinstance(chats,list) or not chats:raise IOError("Archive has no saved chats")
-        for item in chats:
-            cid=re.sub(r"[^A-Za-z0-9_-]","",str(item.get("id",""))) if isinstance(item,dict) else ""
-            if not cid or f"yj64-workspace/chats/{cid}.json" not in merged:raise IOError("Saved chat history missing")
-        try:
-            with self._connect() as db:events=db.execute("SELECT timestamp_ms,event,data_json FROM events ORDER BY id").fetchall()
-            merged["yj64-events-export.json"]=json.dumps(events,ensure_ascii=False).encode("utf-8")
-        except sqlite3.Error:pass
-        messages=[]
-        for name,data in merged.items():
-            if name.startswith("yj64-workspace/chats/") and name.endswith(".json"):
-                rows=json.loads(data.decode("utf-8"))
-                if isinstance(rows,list):messages.extend(x for x in rows if isinstance(x,dict))
-        messages.sort(key=lambda x:x.get("timestamp",x.get("timestamp_ms",0)) or 0);now=int(time.time()*1000)
-        manifest={"schema":self.ARCHIVE_SCHEMA,"archive_id":(old_manifest or {}).get("archive_id") or uuid.uuid4().hex,
-          "created_at":(old_manifest or {}).get("created_at") or time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime(now/1000)),
-          "updated_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime(now/1000)),
-          "last_message_id":str(messages[-1].get("message_id","")) if messages else None,"message_count":len(messages),
-          "included":["common_chat_history","workspace_metadata","local_skills","router_model_settings_without_secrets","technical_diagnostics"],
-          "excluded":["participant_private_messages","api_keys_and_tokens","application_private_database"],
-          "files":{n:{"sha256":self._sha(d),"size":len(d)} for n,d in sorted(merged.items())}}
-        try:
-            for target in (tmp,state_tmp):
-                with zipfile.ZipFile(target,"w",compression=zipfile.ZIP_DEFLATED) as z:
-                    for n,d in sorted(merged.items()):z.writestr(n,d)
-                    z.writestr("manifest.json",json.dumps(manifest,ensure_ascii=False,indent=2))
-                self._verify_archive(target)
-            os.replace(state_tmp,self.archive_state_path);os.replace(tmp,dest)
-        except Exception:tmp.unlink(missing_ok=True);state_tmp.unlink(missing_ok=True);raise
-        return dest
-```
-
-FILE: main.py — _auto_export_download_archive()
-```python
-    def _auto_export_download_archive(self, *_: Any) -> None:
-        """Create a verified archive in public Downloads/YJ-64 without opening a picker."""
-        temp_path = Path(self.user_data_dir) / "YJ-64-backup-auto.zip"
-        verify_path = Path(self.user_data_dir) / "YJ-64-backup-auto-verify.zip"
-        uri = None
-        try:
-            self._save_common_history()
-            self.persistent_core.export_archive(temp_path)
-            from jnius import autoclass
-            PythonActivity = autoclass("org.kivy.android.PythonActivity")
-            ContentValues = autoclass("android.content.ContentValues")
-            MediaStoreDownloads = autoclass("android.provider.MediaStore$Downloads")
-            resolver = PythonActivity.mActivity.getContentResolver()
-            stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
-            values = ContentValues()
-            values.put("display_name", "YJ-64-backup-" + stamp + ".zip")
-            values.put("mime_type", "application/zip")
-            values.put("relative_path", "Download/YJ-64/")
-            values.put("is_pending", 1)
-            uri = resolver.insert(MediaStoreDownloads.EXTERNAL_CONTENT_URI, values)
-            if uri is None:
-                raise IOError("Android MediaStore did not create a Downloads file")
-            output = resolver.openOutputStream(uri)
-            if output is None:
-                raise IOError("Android could not open the Downloads archive for writing")
-            source_digest = hashlib.sha256(temp_path.read_bytes()).hexdigest()
-            copied = 0
-            try:
-                with temp_path.open("rb") as source:
-                    while True:
-                        chunk = source.read(65536)
-                        if not chunk:
-                            break
-                        for value_byte in chunk:
-                            output.write(value_byte)
-                        copied += len(chunk)
-                output.flush()
-            finally:
-                output.close()
-            expected = temp_path.stat().st_size
-            if copied != expected or copied <= 0:
-                raise IOError(f"Downloads archive size mismatch: {copied} of {expected} bytes")
-            readback = resolver.openInputStream(uri)
-            if readback is None:
-                raise IOError("Android could not reopen the Downloads archive")
-            read_count = 0
-            try:
-                with verify_path.open("wb") as verify_file:
-                    while True:
-                        value_byte = int(readback.read())
-                        if value_byte < 0:
-                            break
-                        verify_file.write(bytes((value_byte & 0xff,)))
-                        read_count += 1
-            finally:
-                readback.close()
-            import zipfile
-            read_digest = hashlib.sha256(verify_path.read_bytes()).hexdigest() if verify_path.is_file() else ""
-            if read_count != copied or read_digest != source_digest or not zipfile.is_zipfile(verify_path):
-                raise IOError("Downloads archive read-back, SHA-256 or ZIP integrity check failed")
-            with zipfile.ZipFile(verify_path, "r") as check_zip:
-                bad_member = check_zip.testzip()
-                if bad_member or "manifest.json" not in check_zip.namelist():
-                    raise IOError("Downloads archive is incomplete or has a corrupt member")
-            values_done = ContentValues()
-            values_done.put("is_pending", 0)
-            resolver.update(uri, values_done, None, None)
-            self._append_report("memory_archive_auto_download_succeeded",
-                                size_bytes=copied, readback_bytes=read_count,
-                                location="Download/YJ-64", zip_integrity_verified=True)
-            self._archive_auto_export_error = ""
-        except Exception as exc:
-            self._archive_auto_export_error = f"{type(exc).__name__}: {exc}"
-            self.status.text = (
-                "Автосохранение архива не удалось: "
-                + self._archive_auto_export_error
-            )
-            self._append_report(
-                "memory_archive_auto_download_failed",
-                error_type=type(exc).__name__,
-                error=str(exc),
-                location="Download/YJ-64",
-            )
-            if uri is not None:
-                try:
-                    from jnius import autoclass
-                    PythonActivity = autoclass("org.kivy.android.PythonActivity")
-                    PythonActivity.mActivity.getContentResolver().delete(
-                        uri, None, None
-                    )
-                except Exception:
-                    pass
-        finally:
-            temp_path.unlink(missing_ok=True)
-            verify_path.unlink(missing_ok=True)
-
-```
-
-FILE: main.py — private participant history load/save use
-```python
-        history = self.private_histories.setdefault(
-            participant_name, self.workspace.load_named_history(participant_name)
-        )
-        output_lines = [
-            f"{'You' if item.get('role') == 'user' else participant_name}:\n{item.get('content', '')}"
-            for item in history
-        ]
-        content = BoxLayout(orientation="vertical", spacing=8, padding=12)
-        output = TextInput(
-            text="\n\n".join(output_lines) or f"{participant_name} private conversation.",
-            readonly=True,
-            multiline=True,
-        )
-        prompt = TextInput(
-            hint_text=f"Private message to {participant_name}...",
-            multiline=True,
-            size_hint_y=None,
-            height=110,
-            write_tab=False,
-        )
-        send = FeedbackButton(text="SEND PRIVATELY", size_hint_y=None, height=54)
-```
-
-IMPLEMENTATION DESIGN TO APPLY ON THE OPERATING TABLE
-1. Common archive collector must omit yj64-workspace/histories/** entirely and recursively strip private_messages from all JSON. It must not copy private history content into restored common context.
-2. PersistentCore gains export_private_archives(directory): build one ZIP per participant from the existing histories/*.json plus matching private_messages extracted from agents/*.json using the agent runner/name metadata; never mutate source JSON. Include manifest, IDs/timestamps, SHA-256 and verify every member with testzip + manifest checks.
-3. Existing export_archive(destination) remains common-only and is changed to enforce the exclusion before merging prior archive state; previously merged private-history paths must be removed from the common archive on export.
-4. Main export action creates common ZIP plus all private ZIPs, then publishes every ZIP to Download/YJ-64 using Android MediaStore and verifies byte count + SHA-256 + ZIP integrity after read-back. Report success/failure separately for each file; never report aggregate PASS if any file failed.
-5. Keep import compatibility: common ZIP import restores only common data; private ZIP import is a distinct explicit operation and must validate participant identity/schema before writing to histories/agents. Do not silently import private archives as common archives.
-6. Access policy: owner app controls all local private archives; model participants receive only their own private history in request construction; other participants and monitor receive no private archive contents. Do not claim cryptographic protection. Encryption/key management is a separate unresolved requirement and plaintext ZIPs must be labelled as such.
-7. Preserve message_id, timestamp/timestamp_ms, session_id, participant_id and legacy message fields. Do not invent or flatten timestamps.
-
-VALIDATION REQUIRED BEFORE BUILD
-- Unit test common ZIP has no histories/** paths and no private_messages keys or values.
-- Unit test each private ZIP contains only the matching participant's history/agent private messages.
-- Verify ZIP manifest hashes, testzip, nonzero size and no duplicate/unsafe paths.
-- Verify legacy common archive import still works and private ZIP is rejected by common importer.
-- Verify Android MediaStore read-back for every generated ZIP, including failure reporting.
-- Verify no private history is included in restored-model-context.json.
-- Guard Validation PASS; only then version bump and Android build.
-
-NOTE: this is a new implementation patch. No working files have been changed yet.
 ============================================================
 
 IMPLEMENTATION RECORD — YJ64-PRIVATE-CHAT-ARCHIVE-001
@@ -798,3 +539,110 @@ SECTION_RE = re.compile(
 )
 END ALLOWED
 EXPECTED-GIT-BLOB-SHA:tools/verify_guard.py=05604885ec0babf25fa55ea6d5343b21c7f88a7d
+
+============================================================
+ФИНАЛЬНАЯ ОЧЕРЕДЬ РЕШЕНИЯ ЗАДАЧ
+============================================================
+
+СТАТУС: 7 ПОСЛЕДОВАТЕЛЬНЫХ ЭТАПОВ. АКТИВНЫХ ПАТЧЕЙ НЕТ.
+
+Очередь содержит только незавершённую работу. Реализованные механизмы
+не дублируются здесь. Переход к следующему этапу — после проверки
+результата предыдущего. Запись в очереди не является разрешением
+на изменение рабочих файлов.
+
+ЭТАП 1. ПРОВЕРИТЬ ИСПРАВНОСТЬ СВЯЗИ «УЧАСТНИК — ЛИЧНЫЕ ДАННЫЕ»
+Зависимость: нет; выполнить первым, до любых изменений архива.
+- Проверить, как export_private_archives() сопоставляет имена файлов
+  histories/*.json и runner у agents/*.json.
+- Проверить canonical participant IDs, пользовательские отображаемые
+  имена, пробелы/символы и варианты runner, отличные от Participant 1/2/3.
+- Убедиться, что личные истории и private_messages не попадают в архив
+  другого участника.
+- Добавить тесты на корректные совпадения, несовпадения и конфликт имён.
+Результат этапа: однозначное и протестированное правило группировки.
+
+ЭТАП 2. ПРОВЕРИТЬ РЕАЛЬНУЮ КРИПТОГРАФИЮ В ANDROID-ПРИЛОЖЕНИИ
+Зависимость: этап 1.
+- Найти исходник класса
+  org.blackmirror.blackmirror.PrivateArchiveCrypto и подтвердить,
+  что он входит в Android APK.
+- Проверить реализацию AES-256-GCM и PBKDF2-HMAC-SHA256, параметры
+  соли/nonce/итераций и формат зашифрованного файла.
+- Проверить encrypt/decrypt, неверную парольную фразу, повреждённый файл,
+  пустой файл и очистку временного plaintext после ошибок.
+- Добавить проверяемые тесты; не считать вызов Java-класса из main.py
+  доказательством корректной криптографии.
+Результат этапа: подтверждённая реализация и тесты шифрования/расшифрования.
+
+ЭТАП 3. ЗАФИКСИРОВАТЬ ФИНАЛЬНЫЙ ФОРМАТ И ПОЛИТИКУ СОХРАНЕНИЯ
+Зависимость: этапы 1–2.
+- Определить, остаются ли личные архивы отдельными ZIP внутри
+  зашифрованного bundle или требуется иной формат.
+- Определить конечное место сохранения: единый каталог Download/YJ-64
+  либо единый SAF-процесс выбора папки; не смешивать эти два поведения.
+- Сохранить запрет на публикацию личных данных в открытом ZIP.
+- Уточнить, какие файлы создаёт единая операция и как показываются
+  частичный успех и ошибка каждого файла.
+Результат этапа: согласованная спецификация экспорта и восстановления.
+
+ЭТАП 4. ОБЪЕДИНИТЬ ЭКСПОРТ В ОДНУ ПОЛЬЗОВАТЕЛЬСКУЮ ОПЕРАЦИЮ
+Зависимость: этапы 1–3.
+- Сейчас общий архив и зашифрованный личный bundle запускаются
+  разными действиями. Объединить их в один согласованный сценарий.
+- Создавать общий архив и личный зашифрованный bundle в рамках одного
+  запуска, не помещая личные данные в общий архив.
+- Сохранять выбранным на этапе 3 способом; проверять запись и чтение
+  сохранённых файлов обратно, размер и SHA-256.
+- Отдельно показывать результат каждого артефакта; общий успех запрещён,
+  если хотя бы один обязательный файл не сохранён или не проверен.
+Результат этапа: один экспортный запуск с проверяемыми результатами.
+
+ЭТАП 5. ЗАВЕРШИТЬ И ПРОВЕРИТЬ ВОССТАНОВЛЕНИЕ ЛИЧНЫХ АРХИВОВ
+Зависимость: этапы 1–4.
+- Отдельный выбор зашифрованного личного архива и запрос парольной фразы
+  уже присутствуют в main.py; не переписывать их без необходимости.
+- Проверить полный round-trip на устройстве: экспорт → сохранение →
+  выбор файла → расшифрование → проверка bundle → восстановление.
+- Проверить конфликт уже существующих историй, повторный импорт,
+  несовпадающий participant ID, повреждение архива и неверный пароль.
+- Убедиться, что общий ZIP никогда не принимается как личный bundle,
+  и наоборот.
+Результат этапа: безопасное и предсказуемое восстановление без потери
+или смешивания данных участников.
+
+ЭТАП 6. ПРОВЕРИТЬ И ЗАКРЕПИТЬ ПРАВА ДОСТУПА
+Зависимость: этапы 1 и 5.
+- Проверить построение запросов моделей: участник получает собственную
+  личную историю и общий контекст; чужие private histories и private
+  agent messages не передаются другим участникам или monitor.
+- Определить и при необходимости добавить явные проверки requester /
+  owner / participant / monitor для чтения и записи личных данных.
+- Добавить регрессионные тесты на изоляцию участников и отсутствие
+  утечки через общий контекст, экспорт, импорт и диагностику.
+Результат этапа: проверяемая политика доступа, а не только разделение
+данных по файлам.
+
+ЭТАП 7. ПОЛНАЯ ПРОВЕРКА, GUARD, CI И APK
+Зависимость: этапы 1–6.
+- Выполнить unit/regression tests для общего и личного архивов,
+  криптографии, сопоставления участников, восстановления и доступа.
+- Провести Android runtime проверку на реальном устройстве: сохранение,
+  чтение обратно, видимость файла, отмена, частичный сбой и повторный запуск.
+- Обновить защищённые фрагменты и Git blob SHA только по фактическому
+  содержимому рабочих файлов.
+- Запустить Guard Validation и добиться PASS.
+- Затем запустить CI и только после Guard PASS — Android APK build.
+Результат этапа: проверенное состояние проекта и актуальный Guard.
+
+ПРАВИЛО ВЕДЕНИЯ ОЧЕРЕДИ:
+- Не переносить задачи из очереди на операционный стол автоматически.
+- Перед каждым этапом определить точные файлы и фрагменты, показать
+  владельцу план и получить согласование.
+- После реализации удалить завершённую задачу из очереди и оставить
+  краткую запись в implementation record.
+- Не считать Android runtime или криптографию проверенными только
+  на основании статического Python-кода.
+- Сборку не запускать до успешной Guard Validation.
+
+============================================================
