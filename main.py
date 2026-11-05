@@ -580,7 +580,7 @@ class YJ64BaseApp(App):
             verify_path.unlink(missing_ok=True)
 
     def _auto_export_download_archive(self, *_: Any) -> None:
-        """Create common and participant-private ZIPs in the same public Downloads folder."""
+        """Create only the common, privacy-filtered ZIP in the public Downloads folder."""
         temp_dir = Path(self.user_data_dir) / "yj64-archive-export"
         temp_dir.mkdir(parents=True, exist_ok=True)
         local_archives: list[Path] = []
