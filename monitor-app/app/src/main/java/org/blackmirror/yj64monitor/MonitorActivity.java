@@ -205,8 +205,8 @@ public class MonitorActivity extends Activity {
                 }
             } catch (SecurityException e) {
                 text.append("Android restricts this monitor from reading another app's historical process exits. ")
-                    .append("This is an expected platform restriction, not evidence that YJ-64 Base crashed.\\n")
-                    .append("Use the Base-side diagnostic report for crash details.\\n");
+                    .append("This is an expected platform restriction, not evidence that YJ-64 Base crashed.\n")
+                    .append("Use the Base-side diagnostic report for crash details.\n");
                 JSONObject unavailable = new JSONObject();
                 try {
                     unavailable.put("error_type", "SecurityException");
@@ -220,8 +220,8 @@ public class MonitorActivity extends Activity {
                 appendEvent("cross_app_exit_history_unavailable", unavailable.toString());
             } catch (Exception e) {
                 text.append("Crash history read failed: ").append(e.getClass().getSimpleName())
-                    .append("\\nAndroid API: ").append(Build.VERSION.SDK_INT)
-                    .append("\\nTarget package: ").append(TARGET_PACKAGE).append("\\n");
+                    .append("\nAndroid API: ").append(Build.VERSION.SDK_INT)
+                    .append("\nTarget package: ").append(TARGET_PACKAGE).append("\n");
                 JSONObject failure = new JSONObject();
                 try {
                     failure.put("error_type", e.getClass().getSimpleName());
@@ -478,6 +478,6 @@ public class MonitorActivity extends Activity {
     private String esc(String value) {
         if (value == null) return "";
         return value.replace("\\", "\\\\").replace("\"", "\\\"")
-            .replace("\n", "\\n").replace("\r", "\\r");
+            .replace("\n", "\n").replace("\r", "\\r");
     }
 }
