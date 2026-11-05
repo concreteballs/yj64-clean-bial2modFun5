@@ -406,7 +406,7 @@ class YJ64BaseApp(App):
 
     def _open_main_menu(self, *_: Any) -> None:
         content = BoxLayout(orientation="vertical", spacing=8, padding=12)
-        popup = Popup(title="YJ-64 MENU", content=content, size_hint=(0.88, 0.62))
+        popup = Popup(title="YJ-64 MENU", content=content, size_hint=(0.88, 0.84))
         actions = [
             ("СОЗДАТЬ АРХИВ В ЗАГРУЗКАХ", self._auto_export_download_archive),
             ("СОЗДАТЬ АРХИВ ВЫБОРОМ ПАПКИ", self._create_memory_archive),
