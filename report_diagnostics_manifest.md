@@ -105,304 +105,60 @@ END ALLOWED
 ============================================================
 РАЗДЕЛ 4. ОПЕРАЦИОННЫЙ СТОЛ
 
-СТАТУС: 1 НЕЗАВЕРШЁННЫЙ PATCH — ЧАСТИЧНО РЕАЛИЗОВАН; ОСТАЛЬНЫЕ ТРЕБОВАНИЯ ТРЕБУЮТ СВЕРКИ
+СТАТУС: 1 НЕЗАВЕРШЁННЫЙ PATCH — ОСТАЛИСЬ ТОЛЬКО НЕЗАВЕРШЁННЫЕ ТРЕБОВАНИЯ
 
 PATCH-ID: YJ64-PRIVATE-CHAT-ARCHIVE-001
 
-STATUS: IMPLEMENTATION IN PROGRESS — OWNER APPROVAL RECEIVED 2026-10-31
-
 TARGET FILES:
-- chat_workspace.py
-- yj64_persistent_core.py
 - main.py
+- yj64_persistent_core.py
+- Android runtime / private archive publication
 
-НАЗНАЧЕНИЕ:
-Разделить хранение общей и личной переписки; исключить личные данные
-из общего архива; по одной кнопке создавать общий и отдельные личные
-архивы в общей папке Android Download/YJ-64.
+ОСТАВШИЕСЯ ТРЕБОВАНИЯ:
 
-ORIGINAL FRAGMENT:
-NEW FEATURE. Существующий точный исходный фрагмент для замены
-пока не выбран. Перед реализацией его необходимо извлечь из каждого
-затрагиваемого рабочего файла и поместить сюда без изменений.
-Прямой перенос этого эскиза в рабочие файлы запрещён.
+1. Объединить создание общего и личных архивов в один пользовательский
+   запуск. Сейчас автоматическая кнопка публикует только общий ZIP;
+   личный экспорт запускается отдельным действием.
 
-NEW FRAGMENT — USER-PROVIDED DESIGN SPECIFICATION:
-```python
-# ============================================================
-# YJ-64 — PRIVATE CHAT STORAGE AND ARCHIVE
-# VERSION: 1.0
-#
-# ОБЯЗАТЕЛЬНЫЕ ТРЕБОВАНИЯ
-# ============================================================
+2. Определить и реализовать конечный формат личных архивов:
+   текущая реализация формирует отдельные ZIP по участникам, но UI
+   собирает их в один зашифрованный bundle и сохраняет через SAF.
+   Требуется согласовать, как обеспечить отдельность архивов,
+   шифрование и общий целевой каталог Download/YJ-64 без plaintext
+   публикации личных данных.
 
-from pathlib import Path
+3. Проверить сопоставление runner / participant_id с именами файлов
+   историй. Не считать группировку корректной для всех вариантов
+   runner, пока не пройдена отдельная проверка.
 
-# ------------------------------------------------------------
-# 1. ЕДИНАЯ ПАПКА ХРАНЕНИЯ ИСТОРИИ
-# ------------------------------------------------------------
+4. Проверить реальную Android-реализацию PrivateArchiveCrypto:
+   наличие и работу AES-256-GCM / PBKDF2, экспорт, импорт и обработку
+   неверной парольной фразы. Python-код вызывает Java-класс, но его
+   исходник и работа на устройстве здесь не подтверждены.
 
-CHAT_STORAGE = Path("YJ-64/chats")
+5. Проверить Android runtime: публикацию всех требуемых архивов,
+   чтение сохранённых файлов обратно, целостность, видимость в
+   файловом менеджере и раздельную отчётность при частичном сбое.
 
-COMMON_CHAT_FILE = CHAT_STORAGE / "common_chat.json"
+6. Проверить границы доступа. В запрос модели передаётся её собственная
+   личная история, но отдельный requester-level API с явной проверкой
+   read/write прав для owner / participant / monitor пока не подтверждён.
 
-# Для каждого участника создаётся отдельный файл.
-# participant_id должен быть уникальным и безопасным именем.
-
-PRIVATE_CHAT_PATTERN = "private_chat_{participant_id}.json"
-
-# ------------------------------------------------------------
-# 2. РАЗДЕЛЕНИЕ ПРАВ ДОСТУПА
-# ------------------------------------------------------------
-
-ACCESS_RULES = {
-    "owner": {
-        "read": "all_chats",
-        "write": "all_chats",
-    },
-
-    "participant": {
-        "read": "own_private_chat_only",
-        "write": "own_private_chat_only",
-    },
-
-    "other_participants": {
-        "read": False,
-        "write": False,
-    },
-
-    "monitor": {
-        "read": False,
-        "write": False,
-    },
-}
-
-# Проверка доступа обязательна внутри функций чтения и записи.
-# Одного скрытия кнопок или окон недостаточно.
-
-# ------------------------------------------------------------
-# 3. РАЗДЕЛЕНИЕ ОБЩЕЙ И ЛИЧНОЙ ИСТОРИИ
-# ------------------------------------------------------------
-
-def save_common_message(message):
-    """
-    Сохраняет сообщение исключительно в общей истории.
-    """
-    save_to_common_chat(message)
-
-def save_private_message(participant_id, message):
-    """
-    Сохраняет личное сообщение только в файл соответствующего
-    участника.
-    """
-    verify_participant(participant_id)
-
-    save_to_private_chat(
-        participant_id=participant_id,
-        message=message,
-    )
-
-def read_private_messages(requester_id, participant_id):
-    """
-    Владелец может читать все личные чаты.
-    Участник может читать только собственный личный чат.
-    Остальным доступ запрещён.
-    """
-    if requester_id != "owner":
-        if requester_id != participant_id:
-            raise PermissionError("PRIVATE_CHAT_ACCESS_DENIED")
-
-    return load_private_chat(participant_id)
-
-# ------------------------------------------------------------
-# 4. БЕЗУСЛОВНОЕ ИСКЛЮЧЕНИЕ ЛИЧНЫХ СООБЩЕНИЙ
-#    ИЗ ОБЩЕГО АРХИВА
-# ------------------------------------------------------------
-
-COMMON_ARCHIVE_EXCLUSIONS = {
-    "private_messages",
-    "private_chat_files",
-    "private_chat_history",
-    "private_chat_metadata",
-    "participant_private_messages",
-}
-
-def collect_common_archive_files():
-    """
-    Собирает только общую историю и разрешённые данные.
-
-    Запрещено рекурсивно включать личные сообщения
-    из записей участников или других файлов.
-    """
-
-    files = collect_common_workspace_files()
-
-    files = [
-        file for file in files
-        if not is_private_chat_data(file)
-    ]
-
-    files = [
-        file for file in files
-        if not contains_embedded_private_messages(file)
-    ]
-
-    return files
-
-# ------------------------------------------------------------
-# 5. ОТДЕЛЬНЫЙ АРХИВ ДЛЯ КАЖДОГО ЛИЧНОГО ЧАТА
-# ------------------------------------------------------------
-
-def create_private_archive(participant_id, destination):
-    """
-    Создаёт отдельный ZIP конкретного личного чата.
-    В архив не попадают сообщения других участников.
-    """
-
-    messages = load_private_chat(participant_id)
-
-    archive_name = (
-        f"YJ64_private_{participant_id}.zip"
-    )
-
-    return export_private_zip(
-        messages=messages,
-        destination=destination / archive_name,
-        participant_id=participant_id,
-    )
-
-# ------------------------------------------------------------
-# 6. АРХИВ ОБЩЕГО ЧАТА
-# ------------------------------------------------------------
-
-def create_common_archive(destination):
-    """
-    Создаёт архив общей истории.
-    Личные сообщения исключены безусловно.
-    """
-
-    files = collect_common_archive_files()
-
-    return export_common_zip(
-        files=files,
-        destination=destination / "YJ64_common_chat.zip",
-    )
-
-# ------------------------------------------------------------
-# 7. ОДНА КНОПКА — СОЗДАНИЕ ВСЕХ АРХИВОВ
-# ------------------------------------------------------------
-
-def create_all_archives(destination):
-    """
-    Запускается нажатием общей кнопки «Создать архив».
-
-    Все архивы сохраняются в одну папку Downloads/YJ-64,
-    но каждый чат находится в отдельном ZIP-файле.
-    """
-
-    destination.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    results = []
-
-    # Сначала общий чат.
-    results.append(
-        create_common_archive(destination)
-    )
-
-    # Затем личные чаты всех участников.
-    for participant_id in get_all_participant_ids():
-
-        results.append(
-            create_private_archive(
-                participant_id=participant_id,
-                destination=destination,
-            )
-        )
-
-    # Нельзя молча пропускать неудачные операции.
-    return build_archive_report(results)
-
-# ------------------------------------------------------------
-# 8. ЦЕЛЕВОЕ РАСПОЛОЖЕНИЕ АРХИВОВ
-# ------------------------------------------------------------
-
-ARCHIVE_DIRECTORY = "Download/YJ-64"
-
-EXPECTED_ARCHIVES = [
-    "YJ64_common_chat.zip",
-    "YJ64_private_participant_1.zip",
-    "YJ64_private_participant_2.zip",
-    "YJ64_private_participant_3.zip",
-]
-
-# ------------------------------------------------------------
-# 9. КОНТРОЛЬ РЕЗУЛЬТАТА
-# ------------------------------------------------------------
-
-ARCHIVE_REQUIREMENTS = {
-    "preserve_full_history": True,
-    "preserve_timestamps": True,
-    "preserve_session_ids": True,
-    "preserve_message_ids": True,
-
-    "common_archive_excludes_private": True,
-    "private_archives_are_separate": True,
-
-    "all_archives_use_same_directory": True,
-    "archives_visible_in_android_file_manager": True,
-
-    "report_each_archive_result": True,
-    "report_failed_archives": True,
-    "verify_zip_integrity": True,
-    "verify_archive_contents": True,
-
-    "silent_archive_omission": False,
-    "overwrite_without_validation": False,
-}
-
-# ------------------------------------------------------------
-# 10. КРИТЕРИИ ПРИЁМКИ
-# ------------------------------------------------------------
-
-def validate_archive_system():
-    assert common_archive_contains_no_private_messages()
-    assert every_participant_has_separate_archive()
-    assert participant_cannot_read_another_private_chat()
-    assert owner_can_read_all_private_chats()
-    assert monitor_cannot_read_private_chats()
-    assert all_archives_are_in_download_directory()
-    assert all_archives_pass_integrity_check()
-
-    return "YJ64_ARCHIVE_VALIDATION_PASSED"
-```
-
-ОБЯЗАТЕЛЬНЫЕ УСЛОВИЯ ПЕРЕД РЕАЛИЗАЦИЕЙ:
-1. Личные сообщения не должны попадать в общий архив ни напрямую,
-   ни внутри agent JSON, метаданных или вложенных файлов.
-2. Каждый участник получает отдельный файл истории и отдельный ZIP.
-3. Одна кнопка запускает создание общего ZIP и всех личных ZIP.
-4. Все ZIP сохраняются в одной пользовательской папке Download/YJ-64.
-5. Для каждого архива показываются отдельные результат и ошибка.
-6. Сохраняются полная история, message_id, timestamp и session_id.
-7. Доступ проверяется в API чтения/записи, а не только в интерфейсе.
-8. Монитор не получает доступ к содержимому личных чатов.
-9. ZIP integrity и фактическое содержимое проверяются до сообщения PASS.
-10. Не считать обычный ZIP механизмом защиты: отдельно спроектировать
-    шифрование/ключи, если требуется защита после копирования файла.
-11. До изменения рабочих файлов проверить текущие SAF/Download механизмы,
-    существующую схему workspace и совместимость импорта старых архивов.
+7. После завершения — добавить недостающие регрессионные проверки,
+   обновить контрольные SHA и выполнить Guard Validation.
+   Android Build не запускать до Guard PASS.
 
 ПРИМЕЧАНИЕ:
-Предоставленный Python-блок является архитектурным эскизом с
-не реализованными вспомогательными функциями. Его нельзя вставлять
-как готовый исполняемый код. Сначала требуется согласовать точные
-участки файлов и подготовить рабочие реализации.
+Уже реализованные механизмы общего архива, исключения histories и
+private_messages, отдельного ZIP-экспорта, проверки ZIP/manifest/hash,
+отдельного private bundle import с проверкой схемы и participant identity,
+а также нормализации метаданных сообщений повторно в этот список
+не включать. Их реализация и ограничения зафиксированы в
+IMPLEMENTATION RECORD ниже. Это не означает, что Android runtime
+проверен или что весь PATCH завершён.
 
 ============================================================
-============================================================
+
 РАЗДЕЛ 5. ПРОВЕРКА ПЕРЕНОСА
 
 Для каждого активного патча:
