@@ -293,6 +293,8 @@ class PersistentCore:
                     if not isinstance(data, dict) or data.get("schema") != "yj64.private-chat.v1":
                         raise ValueError("Invalid participant private data")
                     participant = self._safe_archive_stem(data.get("participant_id") or "")
+                    if participant != self._safe_archive_stem(inner_manifest.get("participant_id") or ""):
+                        raise ValueError("Participant identity mismatch")
                     histories = data.get("histories", {})
                     agents = data.get("agents", [])
                     if not isinstance(histories, dict) or not isinstance(agents, list):
