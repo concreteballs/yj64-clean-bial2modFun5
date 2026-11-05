@@ -355,7 +355,7 @@ public class MonitorActivity extends Activity {
         input.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
         input.setHint("Fine-grained GitHub token");
         new AlertDialog.Builder(this).setTitle("GitHub report upload")
-            .setMessage("Create a fine-grained token limited to " + OWNER + "/" + REPO + " with Contents: Read and write. The diagnostic JSONL is uploaded only when you press UPLOAD REPORT TO GITHUB and confirm the publication dialog. It is written to the PUBLIC Report file on branch " + BRANCH + ". Reports can include crash details. Saving the token enables that publishing behavior. The token is encrypted with Android Keystore and is not embedded in this APK.")
+            .setMessage("Create a fine-grained token limited to " + OWNER + "/" + REPO + " with Contents: Read and write. The diagnostic JSONL is uploaded only when you press UPLOAD REPORT TO GITHUB and confirm the publication dialog. It is written to the PUBLIC Report file on branch " + BRANCH + ". Reports can include crash details. Saving the token only authorizes a later upload after your explicit confirmation. The token is encrypted with Android Keystore and is not embedded in this APK.")
             .setView(input).setNegativeButton("CANCEL", (d, w) -> d.dismiss())
             .setPositiveButton("SAVE TOKEN", (d, w) -> {
                 String token = input.getText().toString().trim();
