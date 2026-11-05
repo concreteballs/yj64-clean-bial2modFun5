@@ -6,10 +6,9 @@ import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import javax.crypto.Cipher;
 import javax.crypto.SecretKey;
-import javax.crypto.SecretKeyFactory;
 import javax.crypto.spec.GCMParameterSpec;
-import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.SecretKeySpec;
+import javax.crypto.Mac;
 
 /** Portable password-based AES-GCM encryption for private YJ-64 archives. */
 public final class PrivateArchiveCrypto {
@@ -44,17 +43,29 @@ public final class PrivateArchiveCrypto {
     }
 
     private static SecretKey derive(char[] password, byte[] salt) throws Exception {
-        PBEKeySpec spec = new PBEKeySpec(password, salt, ITERATIONS, 256);
+        byte[] passwordBytes = new String(password).getBytes(StandardCharsets.UTF_8);
+        byte[] block = new byte[salt.length + 4];
+        System.arraycopy(salt, 0, block, 0, salt.length);
+        block[block.length - 1] = 1;
+        byte[] u = null;
+        byte[] key = new byte[32];
         try {
-            byte[] key = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
-                .generateSecret(spec).getEncoded();
-            try {
-                return new SecretKeySpec(key, "AES");
-            } finally {
-                java.util.Arrays.fill(key, (byte) 0);
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(passwordBytes, "HmacSHA256"));
+            u = mac.doFinal(block);
+            System.arraycopy(u, 0, key, 0, key.length);
+            for (int round = 1; round < ITERATIONS; round++) {
+                byte[] next = mac.doFinal(u);
+                java.util.Arrays.fill(u, (byte) 0);
+                u = next;
+                for (int i = 0; i < key.length; i++) key[i] ^= u[i];
             }
+            return new SecretKeySpec(key, "AES");
         } finally {
-            spec.clearPassword();
+            java.util.Arrays.fill(passwordBytes, (byte) 0);
+            java.util.Arrays.fill(block, (byte) 0);
+            if (u != null) java.util.Arrays.fill(u, (byte) 0);
+            java.util.Arrays.fill(key, (byte) 0);
         }
     }
 
