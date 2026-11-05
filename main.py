@@ -14,6 +14,8 @@ from pathlib import Path
 from kivy.graphics import Color, RoundedRectangle
 from typing import Any
 
+from diagnostics import sanitize_event_data
+
 from kivy.app import App
 from kivy.clock import Clock
 from kivy.uix.boxlayout import BoxLayout
@@ -2475,6 +2477,7 @@ class YJ64BaseApp(App):
 
     def _append_report(self, event: str, **data: Any) -> None:
         try:
+            safe_data = sanitize_event_data(event, data)
             self.report_path.parent.mkdir(parents=True, exist_ok=True)
             record = {
                 "schema": "yj64.diagnostic.v1",
@@ -2483,20 +2486,19 @@ class YJ64BaseApp(App):
                 "timestamp_ms": int(time.time() * 1000),
                 "monotonic_ns": time.monotonic_ns(),
                 "message_id": f"APP-{uuid.uuid4().hex}",
-                "data": data,
+                "data": safe_data,
             }
             with self.report_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, sort_keys=True) + "\n")
                 handle.flush()
                 os.fsync(handle.fileno())
             try:
-                self.persistent_core.record_event(event, data)
+                self.persistent_core.record_event(event, safe_data)
             except Exception:
                 # SQLite is secondary to the primary diagnostic JSONL; never block UI.
                 pass
         except OSError:
             pass
-
     def _handle_uncaught_exception(self, exc_type: Any, exc_value: Any, exc_tb: Any) -> None:
         try:
             formatted = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))

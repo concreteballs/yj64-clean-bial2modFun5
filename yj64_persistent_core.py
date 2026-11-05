@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib, json, os, re, shutil, sqlite3, time, uuid, zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any
+from diagnostics import sanitize_event_data
 
 class PersistentCore:
     ARCHIVE_SCHEMA = "yj64.archive.v2"
@@ -11,13 +12,38 @@ class PersistentCore:
         self.root=Path(user_data_dir);self.root.mkdir(parents=True,exist_ok=True)
         self.db_path=self.root/"yj64-persistent-core.sqlite3";self.workspace_path=self.root/"yj64-workspace"
         self.report_path=self.root/"yj64-reports"/"yj64-report.jsonl";self.archive_state_path=self.root/"yj64-archive-state.zip"
-        with self._connect() as db:db.execute("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp_ms INTEGER NOT NULL, event TEXT NOT NULL, data_json TEXT NOT NULL)")
+        with self._connect() as db:
+            db.execute("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp_ms INTEGER NOT NULL, event TEXT NOT NULL, data_json TEXT NOT NULL)")
+        self._sanitize_existing_events()
     def _connect(self):
         db=sqlite3.connect(str(self.db_path),timeout=5);db.execute("PRAGMA journal_mode=WAL");return db
     def record_event(self,event:str,data:dict[str,Any]|None=None)->None:
+        safe_data = sanitize_event_data(event, data or {})
         try:
-            with self._connect() as db:db.execute("INSERT INTO events(timestamp_ms,event,data_json) VALUES(?,?,?)",(int(time.time()*1000),str(event),json.dumps(data or {},ensure_ascii=False)))
-        except sqlite3.Error:return
+            with self._connect() as db:
+                db.execute(
+                    "INSERT INTO events(timestamp_ms,event,data_json) VALUES(?,?,?)",
+                    (int(time.time()*1000), str(event), json.dumps(safe_data, ensure_ascii=False)),
+                )
+        except sqlite3.Error:
+            return
+
+    def _sanitize_existing_events(self) -> None:
+        """Remove legacy raw message/error payloads from the local event ledger."""
+        try:
+            with self._connect() as db:
+                rows = db.execute("SELECT id,event,data_json FROM events").fetchall()
+                for row_id, event, raw_json in rows:
+                    try:
+                        raw_data = json.loads(raw_json)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        raw_data = {}
+                    safe_data = sanitize_event_data(str(event), raw_data if isinstance(raw_data, dict) else {})
+                    safe_json = json.dumps(safe_data, ensure_ascii=False)
+                    if safe_json != raw_json:
+                        db.execute("UPDATE events SET data_json=? WHERE id=?", (safe_json, row_id))
+        except sqlite3.Error:
+            return
     @staticmethod
     def _sha(data:bytes)->str:return hashlib.sha256(data).hexdigest()
     @staticmethod
@@ -35,14 +61,17 @@ class PersistentCore:
         return json.dumps(cls._sanitize(data),ensure_ascii=False,indent=2).encode("utf-8")
     def _collect_files(self)->dict[str,bytes]:
         result={}
-        for base in (self.workspace_path,self.report_path):
+        # Diagnostic JSONL can contain legacy sensitive records; never place it
+        # in a common archive, even if older versions wrote raw payloads there.
+        for base in (self.workspace_path,):
             if base.is_file() and not base.is_symlink():items=[base]
             elif base.is_dir() and not base.is_symlink():items=[p for p in base.rglob("*") if p.is_file() and not p.is_symlink()]
             else:items=[]
             for p in items:
                 name=p.relative_to(self.root).as_posix()
-                # Named participant histories are private and never belong in the common archive.
                 if name.startswith("yj64-workspace/histories/"):
+                    continue
+                if p.suffix.lower() == ".jsonl":
                     continue
                 data=p.read_bytes()
                 result[name]=self._sanitize_json(data) if p.suffix.lower()==".json" else data

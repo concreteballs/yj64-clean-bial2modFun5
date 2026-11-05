@@ -6,6 +6,9 @@ on:
     paths:
       - 'report_diagnostics_manifest.md'
       - 'main.py'
+      - 'diagnostics.py'
+      - 'tests/**'
+      - 'reports/latest-report.jsonl'
       - 'chat_workspace.py'
       - 'yj64_persistent_core.py'
       - 'buildozer.spec'
@@ -40,4 +43,7 @@ jobs:
           python3 tools/verify_guard.py
       - name: Compile protected Python modules
         run: |
-          python3 -m py_compile main.py chat_workspace.py yj64_persistent_core.py llm_api.py llm_settings.py message_distributor.py tools/verify_guard.py
+          python3 -m py_compile main.py diagnostics.py chat_workspace.py yj64_persistent_core.py llm_api.py llm_settings.py message_distributor.py tools/verify_guard.py tests/test_diagnostics_privacy.py
+      - name: Run privacy regression tests
+        run: |
+          python3 -m unittest discover -s tests -v

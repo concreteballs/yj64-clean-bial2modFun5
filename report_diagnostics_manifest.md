@@ -151,7 +151,6 @@ COMMON_CHAT_FILE = CHAT_STORAGE / "common_chat.json"
 
 PRIVATE_CHAT_PATTERN = "private_chat_{participant_id}.json"
 
-
 # ------------------------------------------------------------
 # 2. РАЗДЕЛЕНИЕ ПРАВ ДОСТУПА
 # ------------------------------------------------------------
@@ -181,7 +180,6 @@ ACCESS_RULES = {
 # Проверка доступа обязательна внутри функций чтения и записи.
 # Одного скрытия кнопок или окон недостаточно.
 
-
 # ------------------------------------------------------------
 # 3. РАЗДЕЛЕНИЕ ОБЩЕЙ И ЛИЧНОЙ ИСТОРИИ
 # ------------------------------------------------------------
@@ -191,7 +189,6 @@ def save_common_message(message):
     Сохраняет сообщение исключительно в общей истории.
     """
     save_to_common_chat(message)
-
 
 def save_private_message(participant_id, message):
     """
@@ -205,7 +202,6 @@ def save_private_message(participant_id, message):
         message=message,
     )
 
-
 def read_private_messages(requester_id, participant_id):
     """
     Владелец может читать все личные чаты.
@@ -217,7 +213,6 @@ def read_private_messages(requester_id, participant_id):
             raise PermissionError("PRIVATE_CHAT_ACCESS_DENIED")
 
     return load_private_chat(participant_id)
-
 
 # ------------------------------------------------------------
 # 4. БЕЗУСЛОВНОЕ ИСКЛЮЧЕНИЕ ЛИЧНЫХ СООБЩЕНИЙ
@@ -231,7 +226,6 @@ COMMON_ARCHIVE_EXCLUSIONS = {
     "private_chat_metadata",
     "participant_private_messages",
 }
-
 
 def collect_common_archive_files():
     """
@@ -255,7 +249,6 @@ def collect_common_archive_files():
 
     return files
 
-
 # ------------------------------------------------------------
 # 5. ОТДЕЛЬНЫЙ АРХИВ ДЛЯ КАЖДОГО ЛИЧНОГО ЧАТА
 # ------------------------------------------------------------
@@ -278,7 +271,6 @@ def create_private_archive(participant_id, destination):
         participant_id=participant_id,
     )
 
-
 # ------------------------------------------------------------
 # 6. АРХИВ ОБЩЕГО ЧАТА
 # ------------------------------------------------------------
@@ -295,7 +287,6 @@ def create_common_archive(destination):
         files=files,
         destination=destination / "YJ64_common_chat.zip",
     )
-
 
 # ------------------------------------------------------------
 # 7. ОДНА КНОПКА — СОЗДАНИЕ ВСЕХ АРХИВОВ
@@ -334,7 +325,6 @@ def create_all_archives(destination):
     # Нельзя молча пропускать неудачные операции.
     return build_archive_report(results)
 
-
 # ------------------------------------------------------------
 # 8. ЦЕЛЕВОЕ РАСПОЛОЖЕНИЕ АРХИВОВ
 # ------------------------------------------------------------
@@ -347,7 +337,6 @@ EXPECTED_ARCHIVES = [
     "YJ64_private_participant_2.zip",
     "YJ64_private_participant_3.zip",
 ]
-
 
 # ------------------------------------------------------------
 # 9. КОНТРОЛЬ РЕЗУЛЬТАТА
@@ -373,7 +362,6 @@ ARCHIVE_REQUIREMENTS = {
     "silent_archive_omission": False,
     "overwrite_without_validation": False,
 }
-
 
 # ------------------------------------------------------------
 # 10. КРИТЕРИИ ПРИЁМКИ
@@ -442,11 +430,6 @@ def validate_archive_system():
 
 Контрольные значения — Git blob SHA-1.
 
-EXPECTED-GIT-BLOB-SHA:main.py=b3651dc053ee29ed099483cde2624bf7c87b72a4
-EXPECTED-GIT-BLOB-SHA:chat_workspace.py=41201f85eeb892be09dd22c8b838e0195ba0cc1b
-EXPECTED-GIT-BLOB-SHA:yj64_persistent_core.py=bf7bfffb6e0063ce09690c32146280c368b3cac8
-EXPECTED-GIT-BLOB-SHA:buildozer.spec=9ae2a656d9b91c81e739a389a29c4d16c7c7c92f
-
 После каждого согласованного переноса изменения в рабочие файлы
 контрольные SHA должны быть обновлены по фактическому содержимому.
 
@@ -454,7 +437,6 @@ EXPECTED-GIT-BLOB-SHA:buildozer.spec=9ae2a656d9b91c81e739a389a29c4d16c7c7c92f
 
 ============================================================
 КОНЕЦ PROTECTED-LINE-GUARD
-
 
 ============================================================
 ДОПОЛНЕНИЕ К РАЗДЕЛУ 4. ОПЕРАЦИОННЫЙ СТОЛ
@@ -902,7 +884,6 @@ PROPOSED NEW FRAGMENT:
 СТАТУС: ТОЛЬКО НА ОПЕРАЦИОННОМ СТОЛЕ. РАБОЧИЕ ФАЙЛЫ НЕ МЕНЯТЬ.
 GUARD VALIDATION И ANDROID BUILD НЕ ЗАПУСКАЛИСЬ.
 
-
 ============================================================
 PATCH IMPLEMENTATION RECORD — YJ64-REMOTE-RENAME-RESTORED-CONTEXT-002
 APPROVED BY OWNER: 2026-10-31
@@ -939,7 +920,6 @@ ACCEPTANCE CHECKS REQUIRED:
 
 STATUS: IMPLEMENTED IN WORKING FILES; VALIDATION PENDING.
 ============================================================
-
 
 ============================================================
 PATCH IMPLEMENTATION TABLE — YJ64-PRIVATE-CHAT-ARCHIVE-001
@@ -1155,7 +1135,6 @@ VALIDATION REQUIRED BEFORE BUILD
 NOTE: this is a new implementation patch. No working files have been changed yet.
 ============================================================
 
-
 IMPLEMENTATION RECORD — YJ64-PRIVATE-CHAT-ARCHIVE-001
 APPROVED BY OWNER: 2026-10-31
 WORKING FILES UPDATED ON APPROVED BRANCH:
@@ -1180,4 +1159,308 @@ KNOWN LIMITATIONS / REQUIRED FOLLOW-UP:
 - Device-level MediaStore operation, file-manager visibility and failure paths require Android runtime testing.
 - Private archive ZIPs group histories by filename and agent records by runner. This is not encryption or an access-control boundary after a user copies the ZIP.
 
-STATUS: IMPLEMENTED ON WORKING BRANCH; VERSION 0.1.34; GUARD VALIDATION PENDING.
+STATUS: PRIVATE CHAT ARCHIVE IMPLEMENTED; PRIVACY DIAGNOSTICS PATCH ADDED; GUARD/CI VALIDATION PENDING.
+
+============================================================
+PATCH-ID: YJ64-PRIVACY-DIAGNOSTICS-001
+STATUS: IMPLEMENTED — GUARD/CI VALIDATION REQUIRED
+
+SCOPE:
+- Replace raw diagnostic payloads with allowlisted operational metadata.
+- Store only sanitized data in JSONL and SQLite.
+- Migrate existing local SQLite event rows to remove legacy payload text.
+- Exclude diagnostic JSONL and private history files from common archives.
+- Replace the repository's real diagnostic sample with synthetic metadata.
+- Add regression tests and make CI run them before Android build.
+
+FILE: diagnostics.py BEGIN ALLOWED
+"""Privacy-safe diagnostic event filtering for YJ-64.
+
+Only bounded operational metadata is retained. Message bodies, model output,
+exception text, tracebacks, credentials, and arbitrary fields are never stored.
+"""
+from __future__ import annotations
+
+import re
+from typing import Any, Mapping
+
+_SAFE_STRING_FIELDS = {
+    "process_name", "provider", "model", "route_id", "operation_id",
+    "request_id", "error_type", "status", "archive_schema",
+}
+_SAFE_INTEGER_FIELDS = {
+    "pid", "history_count", "common_history_count", "private_history_count",
+    "prompt_length", "response_length", "input_length", "output_length",
+    "file_count", "file_size", "size_bytes", "status_code", "http_status",
+    "retry_count", "attempt", "elapsed_ms", "duration_ms", "line_number",
+}
+_SAFE_BOOLEAN_FIELDS = {
+    "configured", "explicit_user_action", "focused", "success",
+    "all_archives_verified", "private", "error_present",
+}
+_PROMPT_FIELDS = {"prompt", "message", "request", "request_message", "input", "content"}
+_RESPONSE_FIELDS = {"response", "output", "result"}
+_ERROR_FIELDS = {"error", "exception", "traceback", "message_error"}
+_SAFE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,95}$")
+_PARTICIPANT = re.compile(r"^(Owner|Participant [1-9][0-9]*)$")
+
+def _safe_string(field: str, value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value or len(value) > 96:
+        return None
+    if field == "participant":
+        return value if _PARTICIPANT.fullmatch(value) else None
+    if field == "mode":
+        return value if value in {"text", "agent"} else None
+    if field == "provider":
+        return value if _SAFE_TOKEN.fullmatch(value) else None
+    return value if _SAFE_TOKEN.fullmatch(value) else None
+
+def sanitize_event_data(event: str, data: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return a strict metadata-only representation of an event payload."""
+    if not isinstance(data, Mapping):
+        return {}
+
+    safe: dict[str, Any] = {}
+    prompt_length = None
+    response_length = None
+    error_present = False
+
+    for raw_key, value in data.items():
+        key = str(raw_key).strip().lower()
+
+        if key in _PROMPT_FIELDS and isinstance(value, (str, bytes, bytearray)):
+            prompt_length = len(value)
+            continue
+        if key in _RESPONSE_FIELDS and isinstance(value, (str, bytes, bytearray)):
+            response_length = len(value)
+            continue
+        if key in _ERROR_FIELDS:
+            error_present = value is not None
+            continue
+
+        if key in _SAFE_STRING_FIELDS or key in {"participant", "mode"}:
+            cleaned = _safe_string(key, value)
+            if cleaned is not None:
+                safe[key] = cleaned
+            continue
+
+        if key in _SAFE_INTEGER_FIELDS:
+            if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 2**63 - 1:
+                safe[key] = value
+            continue
+
+        if key in _SAFE_BOOLEAN_FIELDS and isinstance(value, bool):
+            safe[key] = value
+
+    if prompt_length is not None:
+        safe["prompt_length"] = prompt_length
+    if response_length is not None:
+        safe["response_length"] = response_length
+    if error_present:
+        safe["error_present"] = True
+    return safe
+END ALLOWED
+
+FILE: main.py BEGIN ALLOWED
+    def _append_report(self, event: str, **data: Any) -> None:
+        try:
+            safe_data = sanitize_event_data(event, data)
+            self.report_path.parent.mkdir(parents=True, exist_ok=True)
+            record = {
+                "schema": "yj64.diagnostic.v1",
+                "agent": "yj64-base-application",
+                "event": event,
+                "timestamp_ms": int(time.time() * 1000),
+                "monotonic_ns": time.monotonic_ns(),
+                "message_id": f"APP-{uuid.uuid4().hex}",
+                "data": safe_data,
+            }
+            with self.report_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, sort_keys=True) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                self.persistent_core.record_event(event, safe_data)
+            except Exception:
+                # SQLite is secondary to the primary diagnostic JSONL; never block UI.
+                pass
+        except OSError:
+            pass
+END ALLOWED
+
+FILE: yj64_persistent_core.py BEGIN ALLOWED
+    def record_event(self,event:str,data:dict[str,Any]|None=None)->None:
+        safe_data = sanitize_event_data(event, data or {})
+        try:
+            with self._connect() as db:
+                db.execute(
+                    "INSERT INTO events(timestamp_ms,event,data_json) VALUES(?,?,?)",
+                    (int(time.time()*1000), str(event), json.dumps(safe_data, ensure_ascii=False)),
+                )
+        except sqlite3.Error:
+            return
+
+    def _sanitize_existing_events(self) -> None:
+        """Remove legacy raw message/error payloads from the local event ledger."""
+        try:
+            with self._connect() as db:
+                rows = db.execute("SELECT id,event,data_json FROM events").fetchall()
+                for row_id, event, raw_json in rows:
+                    try:
+                        raw_data = json.loads(raw_json)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        raw_data = {}
+                    safe_data = sanitize_event_data(str(event), raw_data if isinstance(raw_data, dict) else {})
+                    safe_json = json.dumps(safe_data, ensure_ascii=False)
+                    if safe_json != raw_json:
+                        db.execute("UPDATE events SET data_json=? WHERE id=?", (safe_json, row_id))
+        except sqlite3.Error:
+            return
+END ALLOWED
+
+FILE: yj64_persistent_core.py BEGIN ALLOWED
+    def _collect_files(self)->dict[str,bytes]:
+        result={}
+        # Diagnostic JSONL can contain legacy sensitive records; never place it
+        # in a common archive, even if older versions wrote raw payloads there.
+        for base in (self.workspace_path,):
+            if base.is_file() and not base.is_symlink():items=[base]
+            elif base.is_dir() and not base.is_symlink():items=[p for p in base.rglob("*") if p.is_file() and not p.is_symlink()]
+            else:items=[]
+            for p in items:
+                name=p.relative_to(self.root).as_posix()
+                if name.startswith("yj64-workspace/histories/"):
+                    continue
+                if p.suffix.lower() == ".jsonl":
+                    continue
+                data=p.read_bytes()
+                result[name]=self._sanitize_json(data) if p.suffix.lower()==".json" else data
+        for pattern in ("yj64-router-config.json","yj64-llm-config*.json"):
+            for p in self.root.glob(pattern):
+                if p.is_file() and not p.is_symlink():result[p.name]=self._sanitize_json(p.read_bytes())
+        return result
+END ALLOWED
+
+FILE: tests/test_diagnostics_privacy.py BEGIN ALLOWED
+import json
+import sqlite3
+import tempfile
+import unittest
+from pathlib import Path
+
+from diagnostics import sanitize_event_data
+from yj64_persistent_core import PersistentCore
+
+class DiagnosticPrivacyTests(unittest.TestCase):
+    def test_message_and_model_payloads_are_replaced_with_lengths(self):
+        safe = sanitize_event_data(
+            "participant_request_started",
+            {
+                "participant": "Participant 1",
+                "route_id": "route_1",
+                "mode": "text",
+                "provider": "gemini",
+                "model": "gemini-2.5-flash",
+                "prompt": "private user message",
+                "response": "private model response",
+                "error": "authorization: Bearer very-secret-token",
+                "traceback": "private traceback content",
+                "private_history_count": 2,
+            },
+        )
+        self.assertEqual(safe["prompt_length"], len("private user message"))
+        self.assertEqual(safe["response_length"], len("private model response"))
+        self.assertTrue(safe["error_present"])
+        self.assertEqual(safe["private_history_count"], 2)
+        for forbidden in ("prompt", "response", "error", "traceback"):
+            self.assertNotIn(forbidden, safe)
+        self.assertNotIn("very-secret-token", json.dumps(safe))
+
+    def test_unknown_fields_and_custom_participant_names_are_dropped(self):
+        safe = sanitize_event_data(
+            "event",
+            {
+                "participant": "Alice Smith",
+                "endpoint": "https://example.invalid/private?token=secret",
+                "custom_field": "private data",
+                "pid": 123,
+            },
+        )
+        self.assertEqual(safe, {"pid": 123})
+
+    def test_event_ledger_stores_only_sanitized_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            core = PersistentCore(tmp)
+            core.record_event(
+                "participant_api_response_received",
+                {"response": "private answer", "provider": "openai", "model": "gpt-test"},
+            )
+            with sqlite3.connect(core.db_path) as db:
+                stored = json.loads(db.execute("SELECT data_json FROM events").fetchone()[0])
+            self.assertEqual(stored["response_length"], len("private answer"))
+            self.assertNotIn("response", stored)
+            self.assertEqual(stored["provider"], "openai")
+
+    def test_startup_migration_scrubs_legacy_event_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "yj64-persistent-core.sqlite3"
+            with sqlite3.connect(db_path) as db:
+                db.execute(
+                    "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp_ms INTEGER NOT NULL, event TEXT NOT NULL, data_json TEXT NOT NULL)"
+                )
+                db.execute(
+                    "INSERT INTO events(timestamp_ms,event,data_json) VALUES(1,?,?)",
+                    ("participant_request_started", json.dumps({"prompt": "legacy private text"})),
+                )
+            core = PersistentCore(tmp)
+            with sqlite3.connect(core.db_path) as db:
+                stored = json.loads(db.execute("SELECT data_json FROM events").fetchone()[0])
+            self.assertEqual(stored["prompt_length"], len("legacy private text"))
+            self.assertNotIn("prompt", stored)
+
+    def test_common_archive_excludes_report_jsonl_and_private_histories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            core = PersistentCore(tmp)
+            private_dir = core.workspace_path / "histories"
+            common_dir = core.workspace_path / "chats"
+            private_dir.mkdir(parents=True)
+            common_dir.mkdir(parents=True)
+            (private_dir / "Participant 1.json").write_text(
+                json.dumps([{"role": "user", "content": "private chat text"}]),
+                encoding="utf-8",
+            )
+            (common_dir / "common.json").write_text(
+                json.dumps([{"role": "user", "content": "common chat text"}]),
+                encoding="utf-8",
+            )
+            core.report_path.parent.mkdir(parents=True, exist_ok=True)
+            core.report_path.write_text(
+                '{"event":"participant_request_started","data":{"prompt":"legacy private prompt"}}\n',
+                encoding="utf-8",
+            )
+            collected = core._collect_files()
+            self.assertIn("yj64-workspace/chats/common.json", collected)
+            self.assertNotIn("yj64-workspace/histories/Participant 1.json", collected)
+            self.assertFalse(any(name.endswith(".jsonl") for name in collected))
+
+if __name__ == "__main__":
+    unittest.main()
+END ALLOWED
+
+NOTE:
+Private ZIP archives remain plaintext ZIP files in this patch. Encryption and
+portable password-based key management are not implemented here. Rewriting
+the latest diagnostic sample does not erase earlier Git history; inspect
+history separately if any credential was ever committed and rotate it.
+============================================================
+
+EXPECTED-GIT-BLOB-SHA:main.py=7d55a6da4ae5f6d367e2d5366c0c279f9982531a
+EXPECTED-GIT-BLOB-SHA:chat_workspace.py=41201f85eeb892be09dd22c8b838e0195ba0cc1b
+EXPECTED-GIT-BLOB-SHA:yj64_persistent_core.py=d227def6ad89ee0a3ecea66e2bf34e485cc5bf64
+EXPECTED-GIT-BLOB-SHA:buildozer.spec=9ae2a656d9b91c81e739a389a29c4d16c7c7c92f
+EXPECTED-GIT-BLOB-SHA:diagnostics.py=e768f425255e72c9f9098d9f0816b558b7e81751
+EXPECTED-GIT-BLOB-SHA:tests/test_diagnostics_privacy.py=422a19145921a08acd975faeea2b7d488ae6384f
+EXPECTED-GIT-BLOB-SHA:reports/latest-report.jsonl=ca9f1540f21dfb93aac91ad791dc2840b2d3f233

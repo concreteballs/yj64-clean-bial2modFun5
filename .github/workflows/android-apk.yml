@@ -5,6 +5,12 @@ on:
     branches: ['main', 'test/build-diagnostic-2026-10-31']
     paths:
       - 'PROTECTED-LINE-GUARD'
+      - 'report_diagnostics_manifest.md'
+      - 'main.py'
+      - 'yj64_persistent_core.py'
+      - 'diagnostics.py'
+      - 'tests/**'
+      - 'reports/latest-report.jsonl'
       - '.github/workflows/android-apk.yml'
   workflow_dispatch:
 
@@ -55,7 +61,10 @@ jobs:
 
       - name: Validate Python sources
         run: |
-          python -m py_compile main.py services/internal_monitor.py llm_api.py llm_settings.py message_distributor.py
+          python -m py_compile main.py diagnostics.py services/internal_monitor.py llm_api.py llm_settings.py message_distributor.py tests/test_diagnostics_privacy.py
+      - name: Run privacy regression tests
+        run: |
+          python -m unittest discover -s tests -v
 
       - name: Clean previous Android build artifacts and logs
         run: |
