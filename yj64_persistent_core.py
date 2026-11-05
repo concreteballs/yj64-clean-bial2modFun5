@@ -142,7 +142,7 @@ class PersistentCore:
                     raise IOError(f"Agent private_messages has invalid format: {path.name}")
                 if not private:
                     continue
-                participant = str(agent.get("runner") or "owner")
+                participant = "".join(ch for ch in str(agent.get("runner") or "owner") if ch.isalnum() or ch in "-_ ").strip().replace(" ", "_") or "participant"
                 grouped.setdefault(participant, {"histories": {}, "agents": []})
                 grouped[participant]["agents"].append({
                     "agent_id": str(agent.get("id") or path.stem),
