@@ -47,6 +47,8 @@ FILE: main.py BEGIN ALLOWED
             ("СОЗДАТЬ АРХИВ В ЗАГРУЗКАХ", self._auto_export_download_archive),
             ("СОЗДАТЬ АРХИВ ВЫБОРОМ ПАПКИ", self._create_memory_archive),
             ("ВОССТАНОВИТЬ ИЗ ZIP", self._choose_memory_archive),
+            ("ЭКСПОРТ ЛИЧНЫХ АРХИВОВ (ШИФРОВАНИЕ)", self._open_private_archive_export),
+            ("ВОССТАНОВИТЬ ЛИЧНЫЕ АРХИВЫ", self._open_private_archive_import),
             ("НАСТРОЙКИ ЧАТА: ШРИФТ И ИМЕНА", self._open_chat_appearance_settings),
             (self._t(5), self._open_tools_menu),
             (self._t(6), self._show_chats),
@@ -512,6 +514,56 @@ class DiagnosticPrivacyTests(unittest.TestCase):
             self.assertNotIn("yj64-workspace/histories/Participant 1.json", collected)
             self.assertFalse(any(name.endswith(".jsonl") for name in collected))
 
+    def test_private_bundle_round_trip_restores_private_histories_and_agent_messages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = PersistentCore(Path(tmp) / "source")
+            histories = source.workspace_path / "histories"
+            agents = source.workspace_path / "agents"
+            histories.mkdir(parents=True)
+            agents.mkdir(parents=True)
+            history = [{"role": "user", "content": "secret participant message"}]
+            private_messages = [{"role": "assistant", "content": "private agent response"}]
+            (histories / "participant_1.json").write_text(json.dumps(history), encoding="utf-8")
+            (agents / "agent_1.json").write_text(json.dumps({
+                "id": "agent_1", "name": "Agent One", "runner": "participant_1",
+                "created_ms": 123, "private_messages": private_messages,
+            }), encoding="utf-8")
+            bundle = Path(tmp) / "private-bundle.zip"
+            source.export_private_bundle(bundle)
+            self.assertTrue(bundle.is_file())
+            target = PersistentCore(Path(tmp) / "target")
+            restored = target.import_private_bundle(bundle)
+            self.assertEqual(restored, 2)
+            self.assertEqual(
+                json.loads((target.workspace_path / "histories" / "participant_1.json").read_text(encoding="utf-8")),
+                history,
+            )
+            restored_agent = json.loads((target.workspace_path / "agents" / "agent_1.json").read_text(encoding="utf-8"))
+            self.assertEqual(restored_agent["private_messages"], private_messages)
+
+    def test_private_bundle_rejects_tampered_member_without_restoring(self):
+        import zipfile
+        with tempfile.TemporaryDirectory() as tmp:
+            source = PersistentCore(Path(tmp) / "source")
+            histories = source.workspace_path / "histories"
+            histories.mkdir(parents=True)
+            (histories / "participant_1.json").write_text(
+                json.dumps([{"role": "user", "content": "private"}]), encoding="utf-8"
+            )
+            bundle = Path(tmp) / "private-bundle.zip"
+            source.export_private_bundle(bundle)
+            tampered = Path(tmp) / "tampered.zip"
+            with zipfile.ZipFile(bundle, "r") as original, zipfile.ZipFile(tampered, "w") as changed:
+                for name in original.namelist():
+                    data = original.read(name)
+                    if name.startswith("participants/"):
+                        data += b"tampered"
+                    changed.writestr(name, data)
+            target = PersistentCore(Path(tmp) / "target")
+            with self.assertRaises(ValueError):
+                target.import_private_bundle(tampered)
+            self.assertFalse((target.workspace_path / "histories" / "participant_1.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -524,12 +576,12 @@ the latest diagnostic sample does not erase earlier Git history; inspect
 history separately if any credential was ever committed and rotate it.
 ============================================================
 
-EXPECTED-GIT-BLOB-SHA:main.py=7d55a6da4ae5f6d367e2d5366c0c279f9982531a
+EXPECTED-GIT-BLOB-SHA:main.py=3f8ca98d315c9646fb099afa4e9f685f6769a018
 EXPECTED-GIT-BLOB-SHA:chat_workspace.py=41201f85eeb892be09dd22c8b838e0195ba0cc1b
-EXPECTED-GIT-BLOB-SHA:yj64_persistent_core.py=d227def6ad89ee0a3ecea66e2bf34e485cc5bf64
+EXPECTED-GIT-BLOB-SHA:yj64_persistent_core.py=3921e8e553a13c99ed999d258ad66b8705bfd471
 EXPECTED-GIT-BLOB-SHA:buildozer.spec=9ae2a656d9b91c81e739a389a29c4d16c7c7c92f
 EXPECTED-GIT-BLOB-SHA:diagnostics.py=e768f425255e72c9f9098d9f0816b558b7e81751
-EXPECTED-GIT-BLOB-SHA:tests/test_diagnostics_privacy.py=422a19145921a08acd975faeea2b7d488ae6384f
+EXPECTED-GIT-BLOB-SHA:tests/test_diagnostics_privacy.py=1b0aac12ab641c879ef4d93d6e9513409a604599
 EXPECTED-GIT-BLOB-SHA:reports/latest-report.jsonl=ca9f1540f21dfb93aac91ad791dc2840b2d3f233
 
 FILE: tools/verify_guard.py BEGIN ALLOWED
