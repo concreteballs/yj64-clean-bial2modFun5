@@ -210,6 +210,8 @@ class PersistentCore:
                 "participants/" + path.name: path.read_bytes()
                 for path in archives
             }
+            if not members:
+                raise ValueError("No participant-private data is available to export")
             manifest = {
                 "schema": "yj64.private-bundle.v1",
                 "created_at_ms": int(time.time() * 1000),
@@ -277,7 +279,14 @@ class PersistentCore:
                     inner_manifest = json.loads(participant_zip.read("manifest.json").decode("utf-8"))
                     if not isinstance(inner_manifest, dict) or inner_manifest.get("schema") != "yj64.private-archive.v1":
                         raise ValueError("Unsupported participant archive schema")
-                    data = json.loads(participant_zip.read("private-data.json").decode("utf-8"))
+                    private_json = participant_zip.read("private-data.json")
+                    inner_files = inner_manifest.get("files")
+                    if not isinstance(inner_files, dict) or set(inner_files) != {"private-data.json"}:
+                        raise ValueError("Participant archive manifest is invalid")
+                    inner_meta = inner_files["private-data.json"]
+                    if len(private_json) != int(inner_meta.get("size", -1)) or self._sha(private_json) != inner_meta.get("sha256"):
+                        raise ValueError("Participant archive SHA-256 mismatch")
+                    data = json.loads(private_json.decode("utf-8"))
                     if not isinstance(data, dict) or data.get("schema") != "yj64.private-chat.v1":
                         raise ValueError("Invalid participant private data")
                     participant = self._safe_archive_stem(data.get("participant_id") or "")
