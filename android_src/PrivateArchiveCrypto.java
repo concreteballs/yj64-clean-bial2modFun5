@@ -3,7 +3,6 @@ package org.blackmirror.blackmirror;
 import java.io.File;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.security.SecureRandom;
 import javax.crypto.Cipher;
 import javax.crypto.SecretKey;
@@ -23,6 +22,27 @@ public final class PrivateArchiveCrypto {
 
     private PrivateArchiveCrypto() {}
 
+    private static byte[] readFile(File file) throws Exception {
+        if (!file.isFile() || file.length() <= 0 || file.length() > MAX_FILE_BYTES + 128) {
+            throw new IllegalArgumentException("Archive file size is invalid.");
+        }
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        try (java.io.FileInputStream in = new java.io.FileInputStream(file)) {
+            byte[] chunk = new byte[8192];
+            int count;
+            while ((count = in.read(chunk)) != -1) out.write(chunk, 0, count);
+        }
+        return out.toByteArray();
+    }
+
+    private static void writeBytes(File file, byte[] data) throws Exception {
+        try (java.io.FileOutputStream out = new java.io.FileOutputStream(file)) {
+            out.write(data);
+            out.flush();
+            out.getFD().sync();
+        }
+    }
+
     private static SecretKey derive(char[] password, byte[] salt) throws Exception {
         PBEKeySpec spec = new PBEKeySpec(password, salt, ITERATIONS, 256);
         try {
@@ -40,7 +60,7 @@ public final class PrivateArchiveCrypto {
 
     public static String encryptFile(String inputPath, String outputPath, String password) throws Exception {
         if (password == null || password.length() < 12) throw new IllegalArgumentException("Use a passphrase of at least 12 characters.");
-        byte[] plain = Files.readAllBytes(new File(inputPath).toPath());
+        byte[] plain = readFile(new File(inputPath));
         if (plain.length == 0 || plain.length > MAX_FILE_BYTES) throw new IllegalArgumentException("Private archive size is outside the supported limit.");
         byte[] salt = new byte[SALT_BYTES];
         byte[] iv = new byte[IV_BYTES];
@@ -65,7 +85,7 @@ public final class PrivateArchiveCrypto {
         if (parent != null && !parent.exists() && !parent.mkdirs()) throw new java.io.IOException("Cannot create output directory.");
         File temporary = new File(outputPath + ".tmp");
         try {
-            Files.write(temporary.toPath(), buffer.array());
+            writeBytes(temporary, buffer.array());
             if (output.exists() && !output.delete()) throw new java.io.IOException("Cannot replace encrypted archive.");
             if (!temporary.renameTo(output)) throw new java.io.IOException("Cannot finalize encrypted archive.");
         } finally {
@@ -78,7 +98,7 @@ public final class PrivateArchiveCrypto {
 
     public static String decryptFile(String inputPath, String outputPath, String password) throws Exception {
         if (password == null || password.length() < 1) throw new IllegalArgumentException("Passphrase is required.");
-        byte[] encoded = Files.readAllBytes(new File(inputPath).toPath());
+        byte[] encoded = readFile(new File(inputPath));
         if (encoded.length < MAGIC.length + 4 + SALT_BYTES + IV_BYTES + 16 || encoded.length > MAX_FILE_BYTES + 128) {
             throw new IllegalArgumentException("Encrypted archive has an invalid size.");
         }
@@ -111,7 +131,7 @@ public final class PrivateArchiveCrypto {
             if (parent != null && !parent.exists() && !parent.mkdirs()) throw new java.io.IOException("Cannot create output directory.");
             File temporary = new File(outputPath + ".tmp");
             try {
-                Files.write(temporary.toPath(), plain);
+                writeBytes(temporary, plain);
                 if (output.exists() && !output.delete()) throw new java.io.IOException("Cannot replace temporary archive.");
                 if (!temporary.renameTo(output)) throw new java.io.IOException("Cannot finalize decrypted archive.");
             } finally {
