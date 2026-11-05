@@ -2,7 +2,7 @@ name: YJ-64 Base and Standalone Monitor Android APKs
 
 on:
   push:
-    branches: ['main', 'test/build-diagnostic-2026-10-31']
+    branches: ['main', 'test/build-diagnostic-2026-10-31', 'fix/monitor-github-target-privacy-2026-11-05']
     paths:
       - 'PROTECTED-LINE-GUARD'
       - 'report_diagnostics_manifest.md'
