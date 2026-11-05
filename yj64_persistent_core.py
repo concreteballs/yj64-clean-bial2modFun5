@@ -142,7 +142,7 @@ class PersistentCore:
                     raise IOError(f"Agent private_messages has invalid format: {path.name}")
                 if not private:
                     continue
-                participant = self._safe_archive_stem(agent.get("runner") or "owner")
+                participant = str(agent.get("runner") or "owner")
                 grouped.setdefault(participant, {"histories": {}, "agents": []})
                 grouped[participant]["agents"].append({
                     "agent_id": str(agent.get("id") or path.stem),
@@ -154,7 +154,8 @@ class PersistentCore:
 
         results: list[Path] = []
         for participant, payload in sorted(grouped.items()):
-            archive_path = destination / ("YJ64_private_" + self._safe_archive_stem(participant) + ".zip")
+            participant_hash = hashlib.sha256(participant.encode("utf-8")).hexdigest()[:12]
+            archive_path = destination / ("YJ64_private_" + self._safe_archive_stem(participant) + "_" + participant_hash + ".zip")
             members = {
                 "private-data.json": json.dumps(
                     {"schema": "yj64.private-chat.v1", "participant_id": participant,
