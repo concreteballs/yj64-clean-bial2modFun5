@@ -240,6 +240,8 @@ class PersistentCore:
             temporary.unlink(missing_ok=True)
             for path in archives:
                 path.unlink(missing_ok=True)
+            for path in work.glob("*.zip"):
+                path.unlink(missing_ok=True)
             try:
                 work.rmdir()
             except OSError:
@@ -295,7 +297,7 @@ class PersistentCore:
                     if not isinstance(histories, dict) or not isinstance(agents, list):
                         raise ValueError("Invalid participant history structure")
                     for filename, rows in histories.items():
-                        if not isinstance(filename, str) or Path(filename).name != filename or not filename.endswith(".json"):
+                        if not isinstance(filename, str) or Path(filename).name != filename or "\\" in filename or not filename.endswith(".json"):
                             raise ValueError("Unsafe private history filename")
                         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
                             raise ValueError("Invalid private history rows")
