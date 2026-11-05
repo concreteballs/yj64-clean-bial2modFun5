@@ -43,6 +43,18 @@ public final class PrivateArchiveCrypto {
         }
     }
 
+    public static long copyStream(java.io.InputStream input, java.io.OutputStream output) throws Exception {
+        byte[] buffer = new byte[8192];
+        long copied = 0;
+        int count;
+        while ((count = input.read(buffer)) != -1) {
+            output.write(buffer, 0, count);
+            copied += count;
+        }
+        output.flush();
+        return copied;
+    }
+
     private static SecretKey derive(char[] password, byte[] salt) throws Exception {
         ByteBuffer encodedPassword = StandardCharsets.UTF_8.encode(CharBuffer.wrap(password));
         byte[] passwordBytes = new byte[encodedPassword.remaining()];
