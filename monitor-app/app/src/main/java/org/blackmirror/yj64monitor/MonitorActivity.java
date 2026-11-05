@@ -204,39 +204,30 @@ public class MonitorActivity extends Activity {
                         .put("target_package", TARGET_PACKAGE).put("exits", found).toString());
                 }
             } catch (SecurityException e) {
-                text.append("Android does not allow this monitor to read another app's historical process exits. ")
-                    .append("This is an expected platform restriction, not evidence that YJ-64 Base crashed.\n")
-                    .append("Using Base-side diagnostic IPC instead.\n");
+                text.append("Android restricts this monitor from reading another app's historical process exits. ")
+                    .append("This is an expected platform restriction, not evidence that YJ-64 Base crashed.\\n")
+                    .append("Use the Base-side diagnostic report for crash details.\\n");
                 JSONObject unavailable = new JSONObject();
                 try {
-                    unavailable.put("error_type", e.getClass().getName());
-                    unavailable.put("message", String.valueOf(e.getMessage()));
+                    unavailable.put("error_type", "SecurityException");
                     unavailable.put("target_package", TARGET_PACKAGE);
                     unavailable.put("monitor_package", getPackageName());
                     unavailable.put("android_api", Build.VERSION.SDK_INT);
-                    unavailable.put("android_release", Build.VERSION.RELEASE);
                     unavailable.put("diagnostic_api", "ActivityManager.getHistoricalProcessExitReasons");
                     unavailable.put("cross_application_query", true);
                     unavailable.put("base_side_ipc_expected", true);
                 } catch (Exception ignored) { }
                 appendEvent("cross_app_exit_history_unavailable", unavailable.toString());
             } catch (Exception e) {
-                String stack = stackTrace(e);
-                String message = String.valueOf(e.getMessage());
                 text.append("Crash history read failed: ").append(e.getClass().getSimpleName())
-                    .append("\nMessage: ").append(message)
-                    .append("\nAndroid API: ").append(Build.VERSION.SDK_INT)
-                    .append("\nTarget package: ").append(TARGET_PACKAGE)
-                    .append("\n\nStack trace:\n").append(stack).append("\n");
+                    .append("\\nAndroid API: ").append(Build.VERSION.SDK_INT)
+                    .append("\\nTarget package: ").append(TARGET_PACKAGE).append("\\n");
                 JSONObject failure = new JSONObject();
                 try {
-                    failure.put("error_type", e.getClass().getName());
-                    failure.put("message", message);
-                    failure.put("stack_trace", stack);
+                    failure.put("error_type", e.getClass().getSimpleName());
                     failure.put("target_package", TARGET_PACKAGE);
                     failure.put("monitor_package", getPackageName());
                     failure.put("android_api", Build.VERSION.SDK_INT);
-                    failure.put("android_release", Build.VERSION.RELEASE);
                     failure.put("diagnostic_api", "ActivityManager.getHistoricalProcessExitReasons");
                     failure.put("cross_application_query", true);
                     failure.put("dump_permission_hint", false);
@@ -364,7 +355,7 @@ public class MonitorActivity extends Activity {
         input.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
         input.setHint("Fine-grained GitHub token");
         new AlertDialog.Builder(this).setTitle("GitHub report upload")
-            .setMessage("Create a fine-grained token limited to " + OWNER + "/" + REPO + " with Contents: Read and write. The complete diagnostic JSONL will be uploaded automatically whenever this monitor opens to the PUBLIC Report file on branch " + BRANCH + ". Reports can include crash details. Saving the token enables that publishing behavior. The token is encrypted with Android Keystore and is not embedded in this APK.")
+            .setMessage("Create a fine-grained token limited to " + OWNER + "/" + REPO + " with Contents: Read and write. The diagnostic JSONL is uploaded only when you press UPLOAD REPORT TO GITHUB and confirm the publication dialog. It is written to the PUBLIC Report file on branch " + BRANCH + ". Reports can include crash details. Saving the token enables that publishing behavior. The token is encrypted with Android Keystore and is not embedded in this APK.")
             .setView(input).setNegativeButton("CANCEL", (d, w) -> d.dismiss())
             .setPositiveButton("SAVE TOKEN", (d, w) -> {
                 String token = input.getText().toString().trim();
