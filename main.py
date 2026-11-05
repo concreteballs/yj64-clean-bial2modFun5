@@ -666,7 +666,7 @@ class YJ64BaseApp(App):
             self._append_report("memory_archive_export_failed", error=str(exc))
 
     def _private_password_popup(self, title: str, confirm_text: str, callback: Any,
-                                require_confirmation: bool = False) -> None:
+                                require_confirmation: bool = False, cancel_callback: Any = None) -> None:
         content = BoxLayout(orientation="vertical", spacing=8, padding=12)
         content.add_widget(Label(
             text="Парольная фраза минимум 12 символов. Она не сохраняется на устройстве.",
@@ -684,7 +684,11 @@ class YJ64BaseApp(App):
                       height=270 if require_confirmation else 220, auto_dismiss=False)
         buttons = BoxLayout(size_hint_y=None, height=48, spacing=8)
         cancel = FeedbackButton(text="ОТМЕНА")
-        cancel.bind(on_release=lambda *_: popup.dismiss())
+        def cancel_action(*_):
+            popup.dismiss()
+            if cancel_callback is not None:
+                cancel_callback()
+        cancel.bind(on_release=cancel_action)
         accept = FeedbackButton(text=confirm_text)
         def submit(*_):
             value = password.text
@@ -772,7 +776,10 @@ class YJ64BaseApp(App):
             finally:
                 plain_path.unlink(missing_ok=True)
                 encrypted_path.unlink(missing_ok=True)
-        self._private_password_popup("Пароль личного архива", "РАСШИФРОВАТЬ", restore)
+        self._private_password_popup(
+            "Пароль личного архива", "РАСШИФРОВАТЬ", restore,
+            cancel_callback=lambda: encrypted_path.unlink(missing_ok=True),
+        )
 
     def _choose_memory_archive(self, *_: Any) -> None:
         try:
@@ -798,6 +805,10 @@ class YJ64BaseApp(App):
             return
         if result_code != -1 or intent is None:
             self.status.text = "Операция с архивом отменена."
+            if request_code == 4703 and getattr(self, "_archive_export_path", None):
+                Path(self._archive_export_path).unlink(missing_ok=True)
+            if request_code == 4704:
+                (Path(self.user_data_dir) / "yj64-private-import.yj64p").unlink(missing_ok=True)
             self._append_report("memory_archive_picker_cancelled", request_code=request_code)
             return
         uri = intent.getData()
@@ -953,8 +964,12 @@ class YJ64BaseApp(App):
                 except OSError:
                     pass
         except Exception as exc:
+            if request_code == 4703 and getattr(self, "_archive_export_path", None):
+                Path(self._archive_export_path).unlink(missing_ok=True)
+            if request_code == 4704:
+                temp_path.unlink(missing_ok=True)
             self.status.text = "Ошибка архива памяти: " + str(exc)
-            self._append_report("memory_archive_transfer_failed", request_code=request_code, error=str(exc))
+            self._append_report("memory_archive_transfer_failed", request_code=request_code, error_type=type(exc).__name__)
 
     def _load_language(self) -> str | None:
         path = Path(self.user_data_dir) / "yj64-language.json"
