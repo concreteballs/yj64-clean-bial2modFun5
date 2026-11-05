@@ -1468,3 +1468,11 @@ EXPECTED-GIT-BLOB-SHA:buildozer.spec=9ae2a656d9b91c81e739a389a29c4d16c7c7c92f
 EXPECTED-GIT-BLOB-SHA:diagnostics.py=e768f425255e72c9f9098d9f0816b558b7e81751
 EXPECTED-GIT-BLOB-SHA:tests/test_diagnostics_privacy.py=422a19145921a08acd975faeea2b7d488ae6384f
 EXPECTED-GIT-BLOB-SHA:reports/latest-report.jsonl=ca9f1540f21dfb93aac91ad791dc2840b2d3f233
+
+FILE: tools/verify_guard.py BEGIN ALLOWED
+SECTION_RE = re.compile(
+    r"^FILE: (?P<path>[^\n]+?) BEGIN ALLOWED\n(?P<content>.*?)\nEND ALLOWED$",
+    re.MULTILINE | re.DOTALL,
+)
+END ALLOWED
+EXPECTED-GIT-BLOB-SHA:tools/verify_guard.py=05604885ec0babf25fa55ea6d5343b21c7f88a7d

@@ -9,7 +9,7 @@ from pathlib import Path
 
 GUARD = Path("report_diagnostics_manifest.md")
 SECTION_RE = re.compile(
-    r"^FILE: (?P<path>.+?) BEGIN ALLOWED\n(?P<content>.*?)\nEND ALLOWED$",
+    r"^FILE: (?P<path>[^\n]+?) BEGIN ALLOWED\n(?P<content>.*?)\nEND ALLOWED$",
     re.MULTILINE | re.DOTALL,
 )
 
