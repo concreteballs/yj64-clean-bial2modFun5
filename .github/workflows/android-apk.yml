@@ -11,6 +11,9 @@ on:
       - 'diagnostics.py'
       - 'tests/**'
       - 'reports/latest-report.jsonl'
+      - 'android_src/**'
+      - 'monitor-app/**'
+      - 'buildozer.spec'
       - '.github/workflows/android-apk.yml'
   workflow_dispatch:
 
