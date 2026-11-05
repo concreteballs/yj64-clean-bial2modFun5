@@ -219,7 +219,7 @@ public class MonitorActivity extends Activity {
     private void confirmUploadReport() {
         new AlertDialog.Builder(this)
             .setTitle("Publish diagnostic report?")
-            .setMessage("This uploads the complete JSONL report to the PUBLIC repository concreteballs/yj64-clean-bial2modFun5-bial2modFun5. It may contain prompts, model responses, and error details. Continue only if you are comfortable making those diagnostics public.")
+            .setMessage("This uploads the complete JSONL report to the PUBLIC repository concreteballs/yj64-clean-bial2modFun5. It may contain prompts, model responses, and error details. Continue only if you are comfortable making those diagnostics public.")
             .setNegativeButton("CANCEL", (dialog, which) -> dialog.dismiss())
             .setPositiveButton("UPLOAD", (dialog, which) -> uploadReportToGitHub())
             .show();
