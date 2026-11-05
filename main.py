@@ -794,7 +794,7 @@ class YJ64BaseApp(App):
             self._append_report("memory_archive_import_picker_failed", error=str(exc))
 
     def _on_archive_activity_result(self, request_code: int, result_code: int, intent: Any) -> None:
-        if request_code not in (4701, 4702):
+        if request_code not in (4701, 4702, 4703, 4704):
             return
         if result_code != -1 or intent is None:
             self.status.text = "Операция с архивом отменена."
@@ -805,12 +805,12 @@ class YJ64BaseApp(App):
             self.status.text = "Android не вернул файл."
             self._append_report("memory_archive_uri_missing", request_code=request_code)
             return
-        temp_path = Path(self.user_data_dir) / ("yj64-archive-import.zip" if request_code == 4702 else "YJ-64-backup.zip")
+        temp_path = Path(self.user_data_dir) / ("yj64-private-import.yj64p" if request_code == 4704 else ("yj64-archive-import.zip" if request_code == 4702 else "YJ-64-backup.zip"))
         try:
             from jnius import autoclass
             PythonActivity = autoclass("org.kivy.android.PythonActivity")
             resolver = PythonActivity.mActivity.getContentResolver()
-            if request_code == 4701:
+            if request_code in (4701, 4703):
                 from_stream = autoclass("java.io.FileInputStream")(str(self._archive_export_path))
                 to_stream = resolver.openOutputStream(uri)
             else:
@@ -819,7 +819,7 @@ class YJ64BaseApp(App):
             if from_stream is None or to_stream is None:
                 raise IOError("Android could not open the selected file")
             copied_bytes = 0
-            expected_bytes = Path(self._archive_export_path).stat().st_size if request_code == 4701 else None
+            expected_bytes = Path(self._archive_export_path).stat().st_size if request_code in (4701, 4703) else None
             try:
                 # Use InputStream.read() / OutputStream.write(int), which PyJNIus
                 # supports without importing the unavailable jnius.jarray helper.
@@ -833,11 +833,11 @@ class YJ64BaseApp(App):
             finally:
                 from_stream.close()
                 to_stream.close()
-            if request_code == 4701:
+            if request_code in (4701, 4703):
                 source_digest = hashlib.sha256(Path(self._archive_export_path).read_bytes()).hexdigest()
                 if copied_bytes <= 0 or copied_bytes != expected_bytes:
                     raise IOError(f"Archive transfer incomplete: copied {copied_bytes} of {expected_bytes} bytes")
-                verify_path = Path(self.user_data_dir) / "yj64-archive-readback.zip"
+                verify_path = Path(self.user_data_dir) / ("yj64-archive-readback.zip" if request_code == 4701 else "yj64-private-readback.yj64p")
                 verify_stream = resolver.openInputStream(uri)
                 if verify_stream is None:
                     raise IOError("Android could not reopen the saved archive for verification")
@@ -856,20 +856,30 @@ class YJ64BaseApp(App):
                 read_digest = hashlib.sha256(verify_path.read_bytes()).hexdigest() if verify_path.is_file() else ""
                 if verify_bytes <= 0 or verify_bytes != copied_bytes or read_digest != source_digest:
                     raise IOError(f"Saved archive read-back/SHA-256 mismatch: read {verify_bytes} of {copied_bytes} bytes")
-                if not zipfile.is_zipfile(verify_path):
-                    raise IOError("Saved file is not a valid ZIP archive")
-                with zipfile.ZipFile(verify_path, "r") as check_zip:
-                    bad_member = check_zip.testzip()
-                    if bad_member:
-                        raise IOError("Saved ZIP integrity check failed: " + bad_member)
-                    if "manifest.json" not in check_zip.namelist():
-                        raise IOError("Saved ZIP has no manifest.json")
+                if request_code == 4701:
+                    if not zipfile.is_zipfile(verify_path):
+                        raise IOError("Saved file is not a valid ZIP archive")
+                    with zipfile.ZipFile(verify_path, "r") as check_zip:
+                        bad_member = check_zip.testzip()
+                        if bad_member:
+                            raise IOError("Saved ZIP integrity check failed: " + bad_member)
+                        if "manifest.json" not in check_zip.namelist():
+                            raise IOError("Saved ZIP has no manifest.json")
                 verify_path.unlink(missing_ok=True)
                 self.status.text = f"Архив сохранён и проверен: {verify_bytes} байт. Проверь файл в выбранной папке."
-                self._append_report("memory_archive_export_succeeded", size_bytes=copied_bytes, expected_bytes=expected_bytes, readback_bytes=verify_bytes, zip_integrity_verified=True)
+                self._append_report(
+                    "private_archive_encrypted_export_succeeded" if request_code == 4703 else "memory_archive_export_succeeded",
+                    size_bytes=copied_bytes, expected_bytes=expected_bytes, readback_bytes=verify_bytes,
+                    encrypted=(request_code == 4703), sha256_verified=True,
+                )
+                if request_code == 4703:
+                    Path(self._archive_export_path).unlink(missing_ok=True)
             else:
                 if copied_bytes <= 0:
                     raise IOError("Selected archive is empty")
+                if request_code == 4704:
+                    self._prompt_private_archive_password(temp_path)
+                    return
                 import zipfile
                 if not zipfile.is_zipfile(temp_path):
                     raise IOError("Selected file is not a valid ZIP archive")
