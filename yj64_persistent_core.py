@@ -196,6 +196,146 @@ class PersistentCore:
                 raise
         return results
 
+    def export_private_bundle(self, destination: str | Path) -> Path:
+        """Package participant-private ZIPs into one verified bundle for encryption."""
+        destination = Path(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        work = destination.parent / (destination.name + ".parts")
+        work.mkdir(parents=True, exist_ok=True)
+        archives = []
+        temporary = destination.with_suffix(destination.suffix + ".tmp")
+        try:
+            archives = self.export_private_archives(work)
+            members = {
+                "participants/" + path.name: path.read_bytes()
+                for path in archives
+            }
+            manifest = {
+                "schema": "yj64.private-bundle.v1",
+                "created_at_ms": int(time.time() * 1000),
+                "files": {
+                    name: {"sha256": self._sha(data), "size": len(data)}
+                    for name, data in sorted(members.items())
+                },
+            }
+            with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for name, data in sorted(members.items()):
+                    archive.writestr(name, data)
+                archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+            with zipfile.ZipFile(temporary, "r") as check:
+                if check.testzip() or set(check.namelist()) != set(members) | {"manifest.json"}:
+                    raise IOError("Private bundle integrity check failed")
+                verified = json.loads(check.read("manifest.json").decode("utf-8"))
+                if verified.get("schema") != "yj64.private-bundle.v1":
+                    raise IOError("Private bundle schema mismatch")
+                for name, meta in verified.get("files", {}).items():
+                    data = check.read(name)
+                    if len(data) != int(meta.get("size", -1)) or self._sha(data) != meta.get("sha256"):
+                        raise IOError("Private bundle SHA-256 mismatch: " + name)
+            os.replace(temporary, destination)
+            return destination
+        finally:
+            temporary.unlink(missing_ok=True)
+            for path in archives:
+                path.unlink(missing_ok=True)
+            try:
+                work.rmdir()
+            except OSError:
+                pass
+
+    def import_private_bundle(self, source: str | Path) -> int:
+        """Validate and restore all participant-private histories from a decrypted bundle."""
+        source = Path(source)
+        if not source.is_file() or not zipfile.is_zipfile(source):
+            raise ValueError("Decrypted private bundle is not a valid ZIP archive")
+        staged_data: dict[str, bytes] = {}
+        with zipfile.ZipFile(source, "r") as bundle:
+            names = bundle.namelist()
+            if bundle.testzip() or len(names) != len(set(names)) or names.count("manifest.json") != 1:
+                raise ValueError("Private bundle integrity/manifest check failed")
+            manifest = json.loads(bundle.read("manifest.json").decode("utf-8"))
+            if not isinstance(manifest, dict) or manifest.get("schema") != "yj64.private-bundle.v1":
+                raise ValueError("Unsupported private bundle schema")
+            declared = manifest.get("files")
+            if not isinstance(declared, dict) or set(names) != set(declared) | {"manifest.json"}:
+                raise ValueError("Private bundle file list mismatch")
+            for member, meta in declared.items():
+                if not isinstance(member, str) or not member.startswith("participants/") or not member.endswith(".zip"):
+                    raise ValueError("Unsafe private bundle member")
+                if not self._safe_name(member) or member.count("/") != 1:
+                    raise ValueError("Unsafe private bundle path")
+                nested = bundle.read(member)
+                if len(nested) != int(meta.get("size", -1)) or self._sha(nested) != meta.get("sha256"):
+                    raise ValueError("Private bundle SHA-256 mismatch: " + member)
+                import io
+                with zipfile.ZipFile(io.BytesIO(nested), "r") as participant_zip:
+                    participant_names = participant_zip.namelist()
+                    if participant_zip.testzip() or len(participant_names) != len(set(participant_names)):
+                        raise ValueError("Participant archive integrity check failed")
+                    if set(participant_names) != {"private-data.json", "manifest.json"}:
+                        raise ValueError("Participant archive members are invalid")
+                    inner_manifest = json.loads(participant_zip.read("manifest.json").decode("utf-8"))
+                    if not isinstance(inner_manifest, dict) or inner_manifest.get("schema") != "yj64.private-archive.v1":
+                        raise ValueError("Unsupported participant archive schema")
+                    data = json.loads(participant_zip.read("private-data.json").decode("utf-8"))
+                    if not isinstance(data, dict) or data.get("schema") != "yj64.private-chat.v1":
+                        raise ValueError("Invalid participant private data")
+                    participant = self._safe_archive_stem(data.get("participant_id") or "")
+                    histories = data.get("histories", {})
+                    agents = data.get("agents", [])
+                    if not isinstance(histories, dict) or not isinstance(agents, list):
+                        raise ValueError("Invalid participant history structure")
+                    for filename, rows in histories.items():
+                        if not isinstance(filename, str) or Path(filename).name != filename or not filename.endswith(".json"):
+                            raise ValueError("Unsafe private history filename")
+                        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+                            raise ValueError("Invalid private history rows")
+                        staged_data["yj64-workspace/histories/" + filename] = json.dumps(
+                            rows, ensure_ascii=False, indent=2
+                        ).encode("utf-8")
+                    for agent in agents:
+                        if not isinstance(agent, dict) or not isinstance(agent.get("private_messages"), list):
+                            raise ValueError("Invalid private agent record")
+                        agent_id = re.sub(r"[^A-Za-z0-9_-]", "", str(agent.get("agent_id") or ""))
+                        if not agent_id:
+                            raise ValueError("Invalid private agent identifier")
+                        record = {
+                            "id": agent_id,
+                            "name": str(agent.get("name") or ""),
+                            "runner": str(agent.get("runner") or participant),
+                            "created_ms": agent.get("created_ms"),
+                            "private_messages": agent["private_messages"],
+                        }
+                        staged_data["yj64-workspace/agents/" + agent_id + ".json"] = json.dumps(
+                            record, ensure_ascii=False, indent=2
+                        ).encode("utf-8")
+        staged = []
+        committed = []
+        try:
+            for relative, data in staged_data.items():
+                target = self.root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                temporary = target.with_name(target.name + ".private-restore-tmp")
+                temporary.write_bytes(data)
+                backup = target.read_bytes() if target.is_file() else None
+                staged.append((target, temporary, backup))
+            for target, temporary, backup in staged:
+                os.replace(temporary, target)
+                committed.append((target, backup))
+        except Exception:
+            for target, backup in reversed(committed):
+                if backup is None:
+                    target.unlink(missing_ok=True)
+                else:
+                    rollback = target.with_name(target.name + ".private-rollback-tmp")
+                    rollback.write_bytes(backup)
+                    os.replace(rollback, target)
+            raise
+        finally:
+            for _, temporary, _ in staged:
+                temporary.unlink(missing_ok=True)
+        return len(staged_data)
+
     def export_archive(self,destination:str|Path)->Path:
         dest=Path(destination);dest.parent.mkdir(parents=True,exist_ok=True);tmp=dest.with_suffix(dest.suffix+".tmp");state_tmp=self.archive_state_path.with_suffix(".zip.tmp")
         previous,old_manifest=self._read_previous();merged=dict(previous);current=self._collect_files()
