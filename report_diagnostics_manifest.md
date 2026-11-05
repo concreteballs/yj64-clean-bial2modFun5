@@ -1204,6 +1204,7 @@ _ERROR_FIELDS = {"error", "exception", "traceback", "message_error"}
 _SAFE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,95}$")
 _PARTICIPANT = re.compile(r"^(Owner|Participant [1-9][0-9]*)$")
 
+
 def _safe_string(field: str, value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -1217,6 +1218,7 @@ def _safe_string(field: str, value: Any) -> str | None:
     if field == "provider":
         return value if _SAFE_TOKEN.fullmatch(value) else None
     return value if _SAFE_TOKEN.fullmatch(value) else None
+
 
 def sanitize_event_data(event: str, data: Mapping[str, Any] | None) -> dict[str, Any]:
     """Return a strict metadata-only representation of an event payload."""
@@ -1354,6 +1356,7 @@ from pathlib import Path
 from diagnostics import sanitize_event_data
 from yj64_persistent_core import PersistentCore
 
+
 class DiagnosticPrivacyTests(unittest.TestCase):
     def test_message_and_model_payloads_are_replaced_with_lengths(self):
         safe = sanitize_event_data(
@@ -1445,6 +1448,7 @@ class DiagnosticPrivacyTests(unittest.TestCase):
             self.assertIn("yj64-workspace/chats/common.json", collected)
             self.assertNotIn("yj64-workspace/histories/Participant 1.json", collected)
             self.assertFalse(any(name.endswith(".jsonl") for name in collected))
+
 
 if __name__ == "__main__":
     unittest.main()
