@@ -136,8 +136,8 @@ public class MonitorActivity extends Activity {
     private static final String GITHUB_KEY_ALIAS = "yj64_github_report_upload_key";
     private static final String GITHUB_TOKEN_FILE = "yj64-github-token.enc";
     private static final String GITHUB_OWNER = "concreteballs";
-    private static final String GITHUB_REPO = "yj64-clean-bial2modFun";
-    private static final String GITHUB_BRANCH = "main";
+    private static final String GITHUB_REPO = "yj64-clean-bial2modFun5";
+    private static final String GITHUB_BRANCH = "test/build-diagnostic-2026-10-31";
 
     private SecretKey githubEncryptionKey() throws Exception {
         KeyStore keyStore = KeyStore.getInstance("AndroidKeyStore");
@@ -219,7 +219,7 @@ public class MonitorActivity extends Activity {
     private void confirmUploadReport() {
         new AlertDialog.Builder(this)
             .setTitle("Publish diagnostic report?")
-            .setMessage("This uploads the complete JSONL report to the PUBLIC repository concreteballs/yj64-clean. It may contain prompts, model responses, and error details. Continue only if you are comfortable making those diagnostics public.")
+            .setMessage("This uploads the complete JSONL report to the PUBLIC repository concreteballs/yj64-clean-bial2modFun5. It may contain prompts, model responses, and error details. Continue only if you are comfortable making those diagnostics public.")
             .setNegativeButton("CANCEL", (dialog, which) -> dialog.dismiss())
             .setPositiveButton("UPLOAD", (dialog, which) -> uploadReportToGitHub())
             .show();
