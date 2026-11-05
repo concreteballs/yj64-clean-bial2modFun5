@@ -739,6 +739,7 @@ class YJ64BaseApp(App):
                                 encrypted_size=encrypted_path.stat().st_size,
                                 encryption="AES-256-GCM", kdf="PBKDF2-HMAC-SHA256")
         except Exception as exc:
+            encrypted_path.unlink(missing_ok=True)
             self.status.text = "Не удалось зашифровать личный архив: " + str(exc)
             self._append_report("private_archive_encrypted_export_failed",
                                 error_type=type(exc).__name__)
@@ -818,6 +819,10 @@ class YJ64BaseApp(App):
         uri = intent.getData()
         if uri is None:
             self.status.text = "Android не вернул файл."
+            if request_code == 4703 and getattr(self, "_archive_export_path", None):
+                Path(self._archive_export_path).unlink(missing_ok=True)
+            if request_code == 4704:
+                (Path(self.user_data_dir) / "yj64-private-import.yj64p").unlink(missing_ok=True)
             self._append_report("memory_archive_uri_missing", request_code=request_code)
             return
         temp_path = Path(self.user_data_dir) / ("yj64-private-import.yj64p" if request_code == 4704 else ("yj64-archive-import.zip" if request_code == 4702 else "YJ-64-backup.zip"))
