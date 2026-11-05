@@ -2,6 +2,7 @@ package org.blackmirror.blackmirror;
 
 import java.io.File;
 import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import javax.crypto.Cipher;
@@ -43,7 +44,9 @@ public final class PrivateArchiveCrypto {
     }
 
     private static SecretKey derive(char[] password, byte[] salt) throws Exception {
-        byte[] passwordBytes = new String(password).getBytes(StandardCharsets.UTF_8);
+        ByteBuffer encodedPassword = StandardCharsets.UTF_8.encode(CharBuffer.wrap(password));
+        byte[] passwordBytes = new byte[encodedPassword.remaining()];
+        encodedPassword.get(passwordBytes);
         byte[] block = new byte[salt.length + 4];
         System.arraycopy(salt, 0, block, 0, salt.length);
         block[block.length - 1] = 1;
@@ -63,6 +66,7 @@ public final class PrivateArchiveCrypto {
             return new SecretKeySpec(key, "AES");
         } finally {
             java.util.Arrays.fill(passwordBytes, (byte) 0);
+            if (encodedPassword.hasArray()) java.util.Arrays.fill(encodedPassword.array(), (byte) 0);
             java.util.Arrays.fill(block, (byte) 0);
             if (u != null) java.util.Arrays.fill(u, (byte) 0);
             java.util.Arrays.fill(key, (byte) 0);
