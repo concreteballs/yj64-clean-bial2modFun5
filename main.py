@@ -596,16 +596,13 @@ class YJ64BaseApp(App):
                 failures.append({"archive": common_path.name, "error": f"{type(exc).__name__}: {exc}"})
                 self._append_report("memory_archive_file_export_failed", archive=common_path.name,
                                     archive_type="common", error_type=type(exc).__name__, error=str(exc))
-            try:
-                private_paths = self.persistent_core.export_private_archives(temp_dir)
-                local_archives.extend(private_paths)
-                self._append_report("memory_private_archives_prepared",
-                                    archive_count=len(private_paths),
-                                    archive_names=[path.name for path in private_paths])
-            except Exception as exc:
-                failures.append({"archive": "participant_private_archives", "error": f"{type(exc).__name__}: {exc}"})
-                self._append_report("memory_private_archives_export_failed",
-                                    error_type=type(exc).__name__, error=str(exc))
+            # Participant-private archives must never be copied to shared Downloads
+            # as plaintext. Their export is intentionally withheld until encrypted
+            # portable export and matching restore are available.
+            self._append_report(
+                "memory_private_archives_export_deferred",
+                reason="portable_encryption_and_restore_not_yet_implemented",
+            )
             for archive_path in local_archives:
                 try:
                     result = self._publish_archive_file_to_downloads(archive_path)
