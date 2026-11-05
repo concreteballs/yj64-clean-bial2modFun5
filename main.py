@@ -833,18 +833,10 @@ class YJ64BaseApp(App):
                 to_stream = autoclass("java.io.FileOutputStream")(str(temp_path))
             if from_stream is None or to_stream is None:
                 raise IOError("Android could not open the selected file")
-            copied_bytes = 0
+            crypto = autoclass("org.blackmirror.blackmirror.PrivateArchiveCrypto")
             expected_bytes = Path(self._archive_export_path).stat().st_size if request_code in (4701, 4703) else None
             try:
-                # Use InputStream.read() / OutputStream.write(int), which PyJNIus
-                # supports without importing the unavailable jnius.jarray helper.
-                while True:
-                    value = int(from_stream.read())
-                    if value < 0:
-                        break
-                    to_stream.write(value & 0xff)
-                    copied_bytes += 1
-                to_stream.flush()
+                copied_bytes = int(crypto.copyStream(from_stream, to_stream))
             finally:
                 from_stream.close()
                 to_stream.close()
@@ -856,17 +848,12 @@ class YJ64BaseApp(App):
                 verify_stream = resolver.openInputStream(uri)
                 if verify_stream is None:
                     raise IOError("Android could not reopen the saved archive for verification")
-                verify_bytes = 0
+                verify_file = autoclass("java.io.FileOutputStream")(str(verify_path))
                 try:
-                    with verify_path.open("wb") as verify_file:
-                        while True:
-                            value = int(verify_stream.read())
-                            if value < 0:
-                                break
-                            verify_file.write(bytes((value & 0xff,)))
-                            verify_bytes += 1
+                    verify_bytes = int(crypto.copyStream(verify_stream, verify_file))
                 finally:
                     verify_stream.close()
+                    verify_file.close()
                 import zipfile
                 read_digest = hashlib.sha256(verify_path.read_bytes()).hexdigest() if verify_path.is_file() else ""
                 if verify_bytes <= 0 or verify_bytes != copied_bytes or read_digest != source_digest:
