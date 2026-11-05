@@ -100,6 +100,56 @@ class DiagnosticPrivacyTests(unittest.TestCase):
             self.assertNotIn("yj64-workspace/histories/Participant 1.json", collected)
             self.assertFalse(any(name.endswith(".jsonl") for name in collected))
 
+    def test_private_bundle_round_trip_restores_private_histories_and_agent_messages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = PersistentCore(Path(tmp) / "source")
+            histories = source.workspace_path / "histories"
+            agents = source.workspace_path / "agents"
+            histories.mkdir(parents=True)
+            agents.mkdir(parents=True)
+            history = [{"role": "user", "content": "secret participant message"}]
+            private_messages = [{"role": "assistant", "content": "private agent response"}]
+            (histories / "participant_1.json").write_text(json.dumps(history), encoding="utf-8")
+            (agents / "agent_1.json").write_text(json.dumps({
+                "id": "agent_1", "name": "Agent One", "runner": "participant_1",
+                "created_ms": 123, "private_messages": private_messages,
+            }), encoding="utf-8")
+            bundle = Path(tmp) / "private-bundle.zip"
+            source.export_private_bundle(bundle)
+            self.assertTrue(bundle.is_file())
+            target = PersistentCore(Path(tmp) / "target")
+            restored = target.import_private_bundle(bundle)
+            self.assertEqual(restored, 2)
+            self.assertEqual(
+                json.loads((target.workspace_path / "histories" / "participant_1.json").read_text(encoding="utf-8")),
+                history,
+            )
+            restored_agent = json.loads((target.workspace_path / "agents" / "agent_1.json").read_text(encoding="utf-8"))
+            self.assertEqual(restored_agent["private_messages"], private_messages)
+
+    def test_private_bundle_rejects_tampered_member_without_restoring(self):
+        import zipfile
+        with tempfile.TemporaryDirectory() as tmp:
+            source = PersistentCore(Path(tmp) / "source")
+            histories = source.workspace_path / "histories"
+            histories.mkdir(parents=True)
+            (histories / "participant_1.json").write_text(
+                json.dumps([{"role": "user", "content": "private"}]), encoding="utf-8"
+            )
+            bundle = Path(tmp) / "private-bundle.zip"
+            source.export_private_bundle(bundle)
+            tampered = Path(tmp) / "tampered.zip"
+            with zipfile.ZipFile(bundle, "r") as original, zipfile.ZipFile(tampered, "w") as changed:
+                for name in original.namelist():
+                    data = original.read(name)
+                    if name.startswith("participants/"):
+                        data += b"tampered"
+                    changed.writestr(name, data)
+            target = PersistentCore(Path(tmp) / "target")
+            with self.assertRaises(ValueError):
+                target.import_private_bundle(tampered)
+            self.assertFalse((target.workspace_path / "histories" / "participant_1.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
