@@ -411,6 +411,8 @@ class YJ64BaseApp(App):
             ("СОЗДАТЬ АРХИВ В ЗАГРУЗКАХ", self._auto_export_download_archive),
             ("СОЗДАТЬ АРХИВ ВЫБОРОМ ПАПКИ", self._create_memory_archive),
             ("ВОССТАНОВИТЬ ИЗ ZIP", self._choose_memory_archive),
+            ("ЭКСПОРТ ЛИЧНЫХ АРХИВОВ (ШИФРОВАНИЕ)", self._open_private_archive_export),
+            ("ВОССТАНОВИТЬ ЛИЧНЫЕ АРХИВЫ", self._open_private_archive_import),
             ("НАСТРОЙКИ ЧАТА: ШРИФТ И ИМЕНА", self._open_chat_appearance_settings),
             (self._t(5), self._open_tools_menu),
             (self._t(6), self._show_chats),
@@ -662,6 +664,115 @@ class YJ64BaseApp(App):
         except Exception as exc:
             self.status.text = "Не удалось создать архив: " + str(exc)
             self._append_report("memory_archive_export_failed", error=str(exc))
+
+    def _private_password_popup(self, title: str, confirm_text: str, callback: Any,
+                                require_confirmation: bool = False) -> None:
+        content = BoxLayout(orientation="vertical", spacing=8, padding=12)
+        content.add_widget(Label(
+            text="Парольная фраза минимум 12 символов. Она не сохраняется на устройстве.",
+            size_hint_y=None, height=58,
+        ))
+        password = TextInput(password=True, multiline=False, hint_text="Парольная фраза",
+                             size_hint_y=None, height=48)
+        content.add_widget(password)
+        repeat = None
+        if require_confirmation:
+            repeat = TextInput(password=True, multiline=False, hint_text="Повтори парольную фразу",
+                               size_hint_y=None, height=48)
+            content.add_widget(repeat)
+        popup = Popup(title=title, content=content, size_hint=(0.92, None),
+                      height=270 if require_confirmation else 220, auto_dismiss=False)
+        buttons = BoxLayout(size_hint_y=None, height=48, spacing=8)
+        cancel = FeedbackButton(text="ОТМЕНА")
+        cancel.bind(on_release=lambda *_: popup.dismiss())
+        accept = FeedbackButton(text=confirm_text)
+        def submit(*_):
+            value = password.text
+            if len(value) < (12 if require_confirmation else 1):
+                self.status.text = "Пароль слишком короткий или не указан."
+                return
+            if require_confirmation and repeat.text != value:
+                self.status.text = "Парольные фразы не совпадают."
+                return
+            popup.dismiss()
+            callback(value)
+            password.text = ""
+            if repeat is not None:
+                repeat.text = ""
+        accept.bind(on_release=submit)
+        buttons.add_widget(cancel)
+        buttons.add_widget(accept)
+        content.add_widget(buttons)
+        popup.open()
+
+    def _open_private_archive_export(self, *_: Any) -> None:
+        self._private_password_popup(
+            "Шифрование личных архивов", "ЗАШИФРОВАТЬ",
+            self._create_encrypted_private_bundle, require_confirmation=True,
+        )
+
+    def _create_encrypted_private_bundle(self, password: str) -> None:
+        plain_path = Path(self.user_data_dir) / "yj64-private-export.zip"
+        encrypted_path = Path(self.user_data_dir) / "YJ-64-private-backup.yj64p"
+        try:
+            self._save_common_history()
+            self.persistent_core.export_private_bundle(plain_path)
+            from jnius import autoclass
+            crypto = autoclass("org.blackmirror.blackmirror.PrivateArchiveCrypto")
+            crypto.encryptFile(str(plain_path), str(encrypted_path), password)
+            if not encrypted_path.is_file() or encrypted_path.stat().st_size <= 64:
+                raise IOError("Encrypted private archive was not created")
+            self._archive_export_path = str(encrypted_path)
+            Intent = autoclass("android.content.Intent")
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
+            intent.addCategory(Intent.CATEGORY_OPENABLE)
+            intent.setType("application/octet-stream")
+            intent.putExtra(Intent.EXTRA_TITLE, "YJ-64-private-backup.yj64p")
+            PythonActivity.mActivity.startActivityForResult(intent, 4703)
+            self.status.text = "Выбери место для сохранения зашифрованного личного архива."
+            self._append_report("private_archive_encrypted_export_ready",
+                                encrypted_size=encrypted_path.stat().st_size,
+                                encryption="AES-256-GCM", kdf="PBKDF2-HMAC-SHA256")
+        except Exception as exc:
+            self.status.text = "Не удалось зашифровать личный архив: " + str(exc)
+            self._append_report("private_archive_encrypted_export_failed",
+                                error_type=type(exc).__name__)
+        finally:
+            plain_path.unlink(missing_ok=True)
+
+    def _open_private_archive_import(self, *_: Any) -> None:
+        try:
+            from jnius import autoclass
+            Intent = autoclass("android.content.Intent")
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+            intent.addCategory(Intent.CATEGORY_OPENABLE)
+            intent.setType("*/*")
+            PythonActivity.mActivity.startActivityForResult(intent, 4704)
+            self.status.text = "Выбери файл YJ-64-private-backup.yj64p."
+        except Exception as exc:
+            self.status.text = "Не удалось открыть выбор архива: " + str(exc)
+
+    def _prompt_private_archive_password(self, encrypted_path: Path) -> None:
+        def restore(password: str) -> None:
+            plain_path = Path(self.user_data_dir) / "yj64-private-import.zip"
+            try:
+                from jnius import autoclass
+                crypto = autoclass("org.blackmirror.blackmirror.PrivateArchiveCrypto")
+                crypto.decryptFile(str(encrypted_path), str(plain_path), password)
+                count = self.persistent_core.import_private_bundle(plain_path)
+                self.status.text = f"Личные данные восстановлены: {count} файлов."
+                self._append_report("private_archive_import_succeeded", restored_files=count,
+                                    encryption="AES-256-GCM")
+            except Exception as exc:
+                self.status.text = "Не удалось восстановить личный архив. Проверь пароль и файл."
+                self._append_report("private_archive_import_failed",
+                                    error_type=type(exc).__name__)
+            finally:
+                plain_path.unlink(missing_ok=True)
+                encrypted_path.unlink(missing_ok=True)
+        self._private_password_popup("Пароль личного архива", "РАСШИФРОВАТЬ", restore)
 
     def _choose_memory_archive(self, *_: Any) -> None:
         try:
