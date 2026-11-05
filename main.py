@@ -761,11 +761,14 @@ class YJ64BaseApp(App):
     def _prompt_private_archive_password(self, encrypted_path: Path) -> None:
         def restore(password: str) -> None:
             plain_path = Path(self.user_data_dir) / "yj64-private-import.zip"
+            restored_ok = False
             try:
                 from jnius import autoclass
                 crypto = autoclass("org.blackmirror.blackmirror.PrivateArchiveCrypto")
                 crypto.decryptFile(str(encrypted_path), str(plain_path), password)
                 count = self.persistent_core.import_private_bundle(plain_path)
+                self.private_histories = {}
+                restored_ok = True
                 self.status.text = f"Личные данные восстановлены: {count} файлов."
                 self._append_report("private_archive_import_succeeded", restored_files=count,
                                     encryption="AES-256-GCM")
@@ -775,7 +778,8 @@ class YJ64BaseApp(App):
                                     error_type=type(exc).__name__)
             finally:
                 plain_path.unlink(missing_ok=True)
-                encrypted_path.unlink(missing_ok=True)
+                if restored_ok:
+                    encrypted_path.unlink(missing_ok=True)
         self._private_password_popup(
             "Пароль личного архива", "РАСШИФРОВАТЬ", restore,
             cancel_callback=lambda: encrypted_path.unlink(missing_ok=True),
