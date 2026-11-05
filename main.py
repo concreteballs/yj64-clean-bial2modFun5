@@ -669,7 +669,7 @@ class YJ64BaseApp(App):
                                 require_confirmation: bool = False, cancel_callback: Any = None) -> None:
         content = BoxLayout(orientation="vertical", spacing=8, padding=12)
         content.add_widget(Label(
-            text="Парольная фраза минимум 12 символов. Она не сохраняется на устройстве.",
+            text="Минимум 12 символов. Без этой фразы восстановить архив нельзя; она не сохраняется.",
             size_hint_y=None, height=58,
         ))
         password = TextInput(password=True, multiline=False, hint_text="Парольная фраза",
