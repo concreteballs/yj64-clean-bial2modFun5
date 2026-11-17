@@ -22,16 +22,25 @@ The package is intentionally `org.blackmirror.blackmirror`, matching the current
 
 The application is deliberately minimal at this stage. The purpose of Stage 2 is to validate the complete lifecycle before the full YJ-64 architecture is introduced.
 
-## Development transport
+## Current diagnostic transport
 
-The development bridge uses loopback TCP:
+The current embedded diagnostic agent uses Android Content Provider IPC to
+communicate with the external monitor:
 
-- host: `127.0.0.1`
-- port: `9333`
-- schema: `yj64.diagnostic.v1`
-- token: configured in `config/bridge.json`
+- authority: `org.blackmirror.yj64monitor.diagnostics`
+- method: `receive_report`
+- report schema: `yj64.diagnostic.v1`
+- configuration: `config/bridge.json`
 
-A real HTTPS reporting endpoint is not configured yet.
+If the provider is unavailable or does not acknowledge a report, the agent
+persists the report in the app-private JSONL spool and retries forwarding it
+later. The current implementation does not use the loopback TCP endpoint
+`127.0.0.1:9333`; that description was stale.
+
+An optional HTTPS upload function exists in the diagnostic agent, but
+`report.https_endpoint` is empty by default. No cloud reporting endpoint is
+configured by this repository yet. The separate, user-initiated GitHub report
+upload in the monitor UI is not the diagnostic IPC transport.
 
 
 Stage 2 build trigger: embedded-agent base integration.
