@@ -103,6 +103,9 @@ jobs:
             p4a/hook.py \
             tools/verify_guard.py
 
+      - name: Run diagnostic spool unit tests
+        run: python -m unittest discover -s tests -v
+
       - name: Build debug APK
         run: |
           buildozer android debug
