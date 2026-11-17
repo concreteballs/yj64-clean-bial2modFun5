@@ -305,4 +305,5 @@ def run() -> None:
         time.sleep(1.0)
 
 
-run()
+if __name__ == "__main__":
+    run()
