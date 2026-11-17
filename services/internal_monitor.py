@@ -180,16 +180,34 @@ def send_report_or_spool(
     return bridge_ok
 
 
+def _spool_checkpoint_path(spool: Path) -> Path:
+    return spool.with_name(spool.name + ".offset")
+
+
+def _save_spool_checkpoint(spool: Path, offset: int) -> None:
+    checkpoint = _spool_checkpoint_path(spool)
+    temporary = checkpoint.with_name(checkpoint.name + ".tmp")
+    temporary.write_text(str(offset), encoding="ascii")
+    os.replace(temporary, checkpoint)
+
+
 def forward_spool_reports(
     config: dict[str, Any],
     spool: Path,
     offset: int,
 ) -> int:
-    """Forward persisted base-app JSONL records in order; retain offset on failure."""
+    """Forward JSONL in order and persist its byte offset across service restarts."""
     if not spool.is_file():
         return 0
-    bridge = config["bridge"]
+
+    checkpoint = _spool_checkpoint_path(spool)
     try:
+        if checkpoint.is_file():
+            offset = int(checkpoint.read_text(encoding="ascii").strip() or "0")
+        file_size = spool.stat().st_size
+        if offset < 0 or offset > file_size:
+            offset = 0
+
         with spool.open("r", encoding="utf-8") as handle:
             handle.seek(offset)
             while True:
@@ -200,17 +218,20 @@ def forward_spool_reports(
                 try:
                     report = json.loads(line)
                 except ValueError:
-                    # Skip a malformed or partial record without blocking later lines.
+                    # Skip malformed records but persist progress so they do not block retries.
                     offset = handle.tell()
+                    _save_spool_checkpoint(spool, offset)
                     continue
                 if not isinstance(report, dict):
                     offset = handle.tell()
+                    _save_spool_checkpoint(spool, offset)
                     continue
                 delivered = send_bridge(config, report)
                 if not delivered:
                     return line_start
                 offset = handle.tell()
-    except OSError:
+                _save_spool_checkpoint(spool, offset)
+    except (OSError, ValueError):
         return offset
 
 
