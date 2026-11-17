@@ -26,7 +26,7 @@ public class DiagnosticReportProvider extends ContentProvider {
         return true;
     }
 
-    @Override public Bundle call(String method, String arg, Bundle extras) {
+    @Override public synchronized Bundle call(String method, String arg, Bundle extras) {
         Bundle result = new Bundle();
         if (!"receive_report".equals(method)) {
             result.putBoolean("ok", false);
