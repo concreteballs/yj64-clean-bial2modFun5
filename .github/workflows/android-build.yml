@@ -1,0 +1,141 @@
+name: YJ-64 Android Debug APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'buildozer.spec'
+      - 'main.py'
+      - '**/*.py'
+      - '**/*.java'
+      - '**/*.json'
+      - 'android_src/**'
+      - 'services/**'
+      - 'config/**'
+      - 'p4a/**'
+      - 'tools/**'
+      - 'PROTECTED-LINE-GUARD'
+      - '.github/workflows/android-build.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: yj64-android-debug-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Guard, Python checks and Android APK
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      PYTHONUNBUFFERED: "1"
+      P4A_PREREQUISITES_INSTALL_INTERACTIVE: "0"
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up host Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10.11"
+          cache: pip
+
+      - name: Install Android build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf \
+            automake \
+            cmake \
+            gettext \
+            libffi-dev \
+            libltdl-dev \
+            libncurses5-dev \
+            libncursesw5-dev \
+            libssl-dev \
+            libtinfo6 \
+            libtool \
+            pkg-config \
+            unzip \
+            zip \
+            zlib1g-dev
+
+      - name: Install pinned Python build tools
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install \
+            "buildozer==1.5.0" \
+            "Cython==0.29.36" \
+            "virtualenv==20.29.3"
+
+      - name: Cache Buildozer, Android SDK and NDK
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.buildozer
+            ~/.android
+          key: ${{ runner.os }}-yj64-buildozer-1.5.0-cython-0.29.36-${{ hashFiles('buildozer.spec') }}
+          restore-keys: |
+            ${{ runner.os }}-yj64-buildozer-1.5.0-cython-0.29.36-
+
+      - name: Verify protected Guard
+        run: python tools/verify_guard.py
+
+      - name: Compile project Python modules
+        run: |
+          python -m py_compile \
+            main.py \
+            chat_workspace.py \
+            yj64_persistent_core.py \
+            llm_api.py \
+            llm_settings.py \
+            message_distributor.py \
+            services/internal_monitor.py \
+            p4a/hook.py \
+            tools/verify_guard.py
+
+      - name: Build debug APK
+        run: |
+          yes | buildozer android debug
+
+      - name: Verify APK output
+        id: apk
+        shell: bash
+        run: |
+          mapfile -t apks < <(find bin -type f -name '*.apk' -print)
+          if [ "${#apks[@]}" -eq 0 ]; then
+            echo "No APK was produced in bin/." >&2
+            exit 1
+          fi
+          printf 'APK files found:\n'
+          printf '%s\n' "${apks[@]}"
+          echo "count=${#apks[@]}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: yj64-android-debug-${{ github.run_number }}
+          path: bin/*.apk
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: yj64-android-build-logs-${{ github.run_number }}
+          path: |
+            .buildozer/android/platform/build-*/build.log
+            .buildozer/android/platform/build-*/**/*.log
+          if-no-files-found: ignore
+          retention-days: 3
