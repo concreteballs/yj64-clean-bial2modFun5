@@ -1017,3 +1017,38 @@ https://github.com/concreteballs/yj64-clean-bial2modFun5/actions/runs/4439273469
 - Перед открытием submit обязательны контролируемый live test, отмена во время работающего provider call, lease recovery после принудительного завершения контейнера и проверка сохранённого результата.
 
 **Следующий этап:** выбрать/подключить постоянный контейнерный runtime для worker, задать секреты двух или более реальных model routes, развернуть worker, проверить heartbeat и провести ограниченный live test. До этого API остаётся безопасно закрытым.
+
+
+---
+
+## 8.3.14. Серверный движок Council и persistent worker — 2026-11-18
+
+### Реализовано в исходном коде приложения
+
+- `llm_api.generate_response()` теперь принимает `config_override`. Это позволяет серверу передавать provider/model/API key из серверного secret manager без чтения локального Android `user_data_dir`. Существующее поведение APK сохранено: без override используется прежний локальный конфиг.
+- `cloud_worker/engine.py` — серверный адаптер, вызывающий тот же центральный маршрутизатор моделей. Требуются минимум два настроенных участника (`route_1`–`route_3`).
+- Жизненный цикл v1: независимые позиции участников → взаимная критика (1–10 раундов) → отдельная структурированная финальная позиция → классификация результата → проверка публичной схемы результата.
+- Таймаут ограничивает весь Council-сеанс; таймаут каждого provider-вызова и ожидания повторов ограничены остатком общего времени.
+- Итог не объявляется безусловным consensus, если есть disagreement, conditional/insufficient verdict или нерешённые вопросы. Weighted voting не заявляется: нет калиброванных весов.
+- `cloud_worker/worker.py` — отдельный persistent process: heartbeat worker registry, claim через атомарную SQL-функцию с lease, progress, heartbeat/renewal, cancel checks, повторный захват истёкшей аренды и terminal failure после исчерпания попыток.
+- `cloud_worker/Dockerfile`, `requirements.txt`, `DEPLOYMENT.md` подготовлены для отдельного container worker.
+- `tests/test_cloud_council_engine.py` содержит детерминированные тесты без платных вызовов provider API.
+- Существующий workflow `.github/workflows/council-worker-tests.yml` выполняет compile, unit tests и Docker build при изменениях worker/router; добавлена поддержка pull request.
+
+### Границы проверки
+
+- CI зелёный на предыдущем SHA `1ba783ad...` (компиляция, тесты и Docker build). Более новые изменения deadline/classification проходят отдельный актуальный run; результат нужно дождаться перед объявлением текущей версии проверенной.
+- Тесты используют fake model responses. Реальные provider credentials и живой вызов моделей не тестировались.
+- Docker image собирается, но persistent container runtime пока не выбран и не развёрнут.
+- Секреты `SUPABASE_SERVICE_ROLE_KEY` и `YJ64_COUNCIL_PROVIDER_CONFIG` ещё не заведены в хранилище секретов worker-host. Provider API keys не переносились из телефона и не добавлялись в GitHub.
+- Без живого worker heartbeat API readiness остаётся false; submit остаётся закрытым.
+
+### Что необходимо для включения live Council
+
+1. Выбрать persistent container host и развернуть Docker worker.
+2. Задать в host secret manager `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `YJ64_COUNCIL_PROVIDER_CONFIG` (минимум два реальных provider route).
+3. Убедиться, что таблица `yj64_council_api_workers` обновляется heartbeat и API `/health` видит активный worker.
+4. Проверить реальный запрос с новым machine agent/token и получить durable result.
+5. Только после E2E проверки выставить Edge Function secrets `YJ64_COUNCIL_ENGINE_ADAPTER=ready` и `YJ64_COUNCIL_WORKER_ENABLED=true`.
+
+**Текущий статус:** код серверного движка и worker подготовлен; cloud worker deployment и live provider test остаются открытыми. Никакой имитации выполнения нет.
