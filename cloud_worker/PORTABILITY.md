@@ -23,7 +23,7 @@ The engine may receive dependencies through constructor arguments/callbacks. It 
 | Provider access | Shared `llm_api.py` router | Keep same router; inject route config from secrets |
 | Durable files | No authoritative worker-local storage | PostgreSQL metadata + optional S3-compatible object storage |
 
-The current worker is intentionally a Supabase adapter implementation. It is not yet database-provider independent. Do not rename the existing Supabase calls as generic PostgreSQL support.
+The worker now depends on the `QueueStore` protocol in `cloud_worker/queue_store.py`. `SupabaseQueueStore` preserves the current PostgREST/RPC behavior. The protocol is the portability boundary, but only the Supabase implementation exists today; this is not yet database-provider independence. Do not configure another backend until its implementation passes the queue contract and recovery tests.
 
 ## Configuration contract
 
@@ -39,9 +39,9 @@ The current worker is intentionally a Supabase adapter implementation. It is not
 ## Migration order
 
 1. Run the existing Supabase-backed worker on a free Linux VM. This is the smallest-risk first deployment.
-2. Extract current Supabase calls from `worker.py` into a `QueueStore` interface and preserve behavior with a Supabase implementation.
+2. [x] Extract current Supabase calls from `worker.py` into a `QueueStore` interface and preserve behavior with a Supabase implementation.
 3. Add a PostgreSQL implementation using atomic claim transactions (for example, `FOR UPDATE SKIP LOCKED`), lease renewal, cancellation, progress and terminal-state writes.
-4. Add integration tests that run against a disposable PostgreSQL container; compare both adapters against the same contract suite.
+4. Add integration tests that run against a disposable PostgreSQL container; compare both adapters against the same contract suite. Current adapter unit tests cover the Supabase compatibility boundary only.
 5. Containerize the HTTP ingress behind the existing API contract; move off Supabase Edge Functions only after authenticated E2E tests pass.
 6. Verify backup/export/restore, then move database and worker together or independently.
 
