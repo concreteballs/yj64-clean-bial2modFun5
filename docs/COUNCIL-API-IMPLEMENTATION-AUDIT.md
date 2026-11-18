@@ -26,12 +26,12 @@ No cloud Council API server, durable request queue, external-agent machine authe
 
 ## 3. API operations (proposed v1 logical contract)
 
-HTTP route names are provisional pending Engineering Core/Gateway integration agreement:
+The Engineering Core Gateway integration document already specifies these routes; use them as the shared contract:
 
-- `POST /v1/council/requests` — submit task; require authenticated agent, idempotency key, mode and task.
-- `GET /v1/council/requests/{request_id}` — execution status and progress.
-- `GET /v1/council/requests/{request_id}/result` — structured result, available only when ready.
-- `POST /v1/council/requests/{request_id}/cancel` — owner-authorized cancellation.
+- `POST /api/v1/external-agents/council/requests` — submit task; require authenticated agent, idempotency key, mode and task.
+- `GET /api/v1/external-agents/council/requests/{request_id}` — execution status and progress.
+- `GET /api/v1/external-agents/council/requests/{request_id}/result` — structured result, available only when ready.
+- `POST /api/v1/external-agents/council/requests/{request_id}/cancel` — owner-authorized cancellation.
 
 The API is asynchronous. Submit returns `accepted` and request/session IDs; polling does not create or restart a Council session.
 
