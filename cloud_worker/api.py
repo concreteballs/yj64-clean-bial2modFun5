@@ -122,8 +122,8 @@ def validate_request(value: Any) -> str | None:
         if (
             isinstance(number, bool)
             or not isinstance(number, (int, float))
-            or not float(number).is_integer()
             or not low <= number <= high
+            or not float(number).is_integer()
         ):
             return error
     if isinstance(limits.get("minimum_critique_rounds"), bool) or limits.get("minimum_critique_rounds") != 1 or not isinstance(limits.get("allow_early_stop"), bool):
