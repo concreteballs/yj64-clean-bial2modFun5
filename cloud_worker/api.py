@@ -237,7 +237,7 @@ async def submit(request: Request):
     if len(raw) > MAX_BODY_BYTES:
         return error("payload_too_large", 413)
     try:
-        body = json.loads(raw)
+        body = json.loads(raw, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
     except (ValueError, UnicodeDecodeError):
         return error("invalid_json", 400)
     validation = validate_request(body)
@@ -249,7 +249,10 @@ async def submit(request: Request):
         return error("agent_identity_mismatch", 403)
     if request.headers.get("idempotency-key") != body["idempotency_key"]:
         return error("idempotency_header_mismatch", 400)
-    request_hash = sha256(stable(body))
+    try:
+        request_hash = sha256(stable(body))
+    except (TypeError, ValueError):
+        return error("invalid_json", 400)
     existing = db_one(
         "SELECT request_id, session_id, request_hash, status FROM public.yj64_council_api_requests "
         "WHERE agent_id = %s AND idempotency_key = %s",
@@ -365,7 +368,7 @@ async def cancel(request_id: str, request: Request):
         raw = await request.body()
         if len(raw) > 4096:
             return error("payload_too_large", 413)
-        body = json.loads(raw)
+        body = json.loads(raw, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
     except (ValueError, UnicodeDecodeError):
         return error("invalid_json", 400)
     if not isinstance(body, dict) or body.get("protocol_version") != VERSION or body.get("agent_id") != agent["agent_id"] or set(body) - {"protocol_version", "agent_id"}:
