@@ -36,6 +36,7 @@ Optional variables:
 - `YJ64_WORKER_ID`: stable unique worker name; otherwise generated.
 - `YJ64_WORKER_POLL_SECONDS`: queue polling interval (default 3).
 - `YJ64_WORKER_LEASE_SECONDS`: lease duration (default 180, bounded 60–900).
+- `YJ64_WORKER_CONCURRENCY`: simultaneous Council requests per container (default 2, bounded 1–8).
 
 ## Build and run
 
@@ -48,7 +49,7 @@ docker run --rm \
   yj64-council-worker
 ```
 
-The container must run continuously with automatic restart on failure. Use at least two independently configured model routes. Provider quotas, latency and cost limits must be reviewed before production traffic is enabled.
+The container must run continuously with automatic restart on failure. Use at least two independently configured model routes. Each container handles up to YJ64_WORKER_CONCURRENCY separate requests concurrently; each request gets its own engine instance and progress callback. Scale Render Background Worker instances horizontally to increase capacity further. Total possible concurrent requests = instance count × per-instance concurrency. Provider quotas, latency and cost limits must be reviewed before production traffic is enabled.
 
 ## Readiness and activation
 
