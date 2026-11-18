@@ -395,8 +395,13 @@ def generate_response(
     route_id: str | None = None,
     mode: str = "text",
     operation_id: str | None = None,
+    config_override: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Single gateway entry point; mode and route are markers, not API details."""
+    """Single gateway entry point; mode and route are markers, not API details.
+
+    Cloud workers may inject a server-side route configuration. The Android
+    application continues to use its private local router file by default.
+    """
     operation = operation_id or uuid.uuid4().hex
     selected_route = _route_id(route_id, participant_name)
     selected_mode = str(mode or "text").strip().lower()
@@ -413,8 +418,12 @@ def generate_response(
         )
         raise RuntimeError(f"Request mode '{selected_mode}' is not supported")
 
-    config = load_config(user_data_dir, route_id=selected_route)
-    provider = config["provider"].strip().lower()
+    config = (
+        {str(k): str(v) for k, v in config_override.items()}
+        if isinstance(config_override, dict)
+        else load_config(user_data_dir, route_id=selected_route)
+    )
+    provider = config.get("provider", "").strip().lower()
     model = config["model"].strip()
     key = config["api_key"].strip()
     agent_id = config.get("agent_id", "").strip()
