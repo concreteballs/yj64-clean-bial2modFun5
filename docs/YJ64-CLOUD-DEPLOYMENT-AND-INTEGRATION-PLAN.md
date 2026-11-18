@@ -860,3 +860,76 @@ OpenAPI сверена с read-only источниками Gateway:
 После закрытия перечисленных проверок начать пакет 2: серверный API intake, machine identity/scopes, owner-scoped request/session persistence, idempotency, durable queue и worker skeleton. Не реализовывать endpoint, который имитирует Council. Реальное выполнение Consensus/Critique будет подключено через server-side adapter и проверено отдельно.
 
 **Проверка Android:** успешный emulator run #29 остаётся подтверждением сборки/установки/запуска APK и диагностического IPC Base → Monitor. Он не является проверкой Council API и не меняет статусы пакетов 2–5.
+
+
+---
+
+## 8.3.13. Реальная облачная инфраструктура и API intake — 2026-11-18
+
+### Проверка существующего Supabase
+
+Проверен проект `YJ64-Autonomous-Core`:
+- Project ref: `ggambesixwejgbjwtnhw`.
+- Статус: `ACTIVE_HEALTHY`.
+- Регион: `eu-central-1` (Frankfurt).
+- PostgreSQL: 17.12.
+- Уже существует приватный Storage bucket `yj64-private-artifacts`.
+- Уже существуют общие таблицы Core `yj64_task_queue`, `yj64_task_checkpoints`, payload/chunk и provider reservation tables. Они содержат действующие данные; приложение не изменяет их и не присваивает их себе.
+- Расширения `pgmq` и `pg_cron` доступны в платформе, но сейчас не установлены. Не считать их работающей очередью.
+
+### Добавленная изолированная схема данных
+
+Вместо совместного использования очереди Core добавлены собственные таблицы приложения:
+- `public.yj64_council_api_agents` — machine identities, SHA-256 token hash, scopes, enabled и last_used_at.
+- `public.yj64_council_api_requests` — durable request/session, idempotency, status, progress, result, cancellation, worker lease и retry counters.
+- `public.yj64_council_api_events` — аудит жизненного цикла.
+
+Добавлена функция `yj64_claim_council_api_request` с атомарным `FOR UPDATE SKIP LOCKED` и lease 15–900 секунд для будущего worker.
+
+**Проверка безопасности после миграции:**
+- RLS включён на всех трёх таблицах.
+- Для `anon` и `authenticated` нет SELECT-привилегий; политик RLS нет, то есть прямой клиентский доступ закрыт.
+- `service_role` имеет доступ для серверной функции.
+- Права на audit sequence также отозваны у `anon`/`authenticated`.
+- Никаких machine tokens или provider keys в таблицы не добавлялось.
+- Security Advisor сообщает INFO `rls_enabled_no_policy` для ранее существовавших Core-таблиц и новых API-таблиц. Для новых API-таблиц это намеренная deny-by-default модель: доступ осуществляется только из Edge Function с server role. Существующие таблицы Core в этом изменении не трогались.
+
+Миграции в БД применены и соответствующие SQL-файлы сохранены в `supabase/migrations/`.
+
+### Развёрнутый API transport
+
+Развёрнута Supabase Edge Function:
+- Slug: `council-api`.
+- Версия: 2.
+- Статус: ACTIVE.
+- Встроенная JWT-проверка Supabase отключена намеренно, поскольку Gateway использует собственный machine Bearer token; сама функция проверяет SHA-256 token hash, identity и scopes.
+- URL base: `https://ggambesixwejgbjwtnhw.supabase.co/functions/v1/council-api`.
+- Реальные маршруты Gateway располагаются после этого base path: `/api/v1/external-agents/council/requests...`.
+
+Реализованы маршруты submit/status/result/cancel, protocol header, payload validation, machine auth/scopes, owner-scoped reads, idempotency, durable request persistence, cancellation и проверка структуры результата. Функция не использует и не изменяет общую очередь Engineering Core.
+
+**Предохранитель:** submit сейчас закрыт и возвращает `503 council_engine_not_ready`, пока серверный Council worker и настоящий engine adapter явно не включены двумя server-side flags. Health endpoint показывает `ready_for_requests: false`, `worker: not_deployed`, `council_engine: not_connected`. Это намеренно: Gateway не должен получать `202 accepted` для задач, которые никто не сможет выполнить.
+
+### Что пока не завершено
+
+- [ ] Разработать и развернуть отдельный long-running worker. Функция claim/lease уже есть, но рабочего процесса пока нет.
+- [ ] Выделить из Kivy UI server-callable Council engine. Текущий `llm_api.py` загружает provider config из локального `user_data_dir`; это не готовый cloud adapter.
+- [ ] Перенести provider credentials в server-side secret storage; не копировать ключи из телефона/APK.
+- [ ] Реализовать формальный Consensus/Critique lifecycle и валидатор итогового результата до записи `completed`.
+- [ ] Добавить worker heartbeat, lease renewal, exhausted-lease failure handling, retry/backoff и проверку cancel на checkpoints.
+- [ ] Зарегистрировать machine identity после согласования agent_id и передать токен Gateway через защищённые server-side secrets. Хранить в БД только SHA-256 hash.
+- [ ] Запустить GitHub Actions workflow `Council API smoke test`; проверить health, protocol gate и отказ неверной machine credentials. Workflow добавлен, но его run ещё не подтверждён в этом коммите.
+- [ ] Выполнить live E2E Gateway → реальный Council → durable result → Gateway consumer.
+
+### Статус пакетов
+
+| Пакет | Новый статус |
+|---|---|
+| 1. Архитектура и контракт | **Частично закрыт** — API runtime и существующий Supabase проверены; контрактные файлы есть. Worker host и полноценный contract diff test остаются открытыми. |
+| 2. API/auth/durable intake | **Реализован частично** — DB schema и Edge API развёрнуты; submit намеренно выключен до появления worker и engine adapter. |
+| 3. Настоящий Council lifecycle | **Не начат** — серверного адаптера и формального lifecycle пока нет. |
+| 4. Recovery/retries/cancel | **Частично** — persistence, idempotency, cancel и claim lease созданы; worker recovery/renewal и реальные retry tests отсутствуют. |
+| 5. Gateway ↔ Council E2E | **Заблокирован** — нет server-side Council worker/adapter и machine credential. |
+| 6. Ограниченный rollout | **Не начат** — API health доступен, но readiness gate закрыт. |
+
+**Граница готовности:** активная Edge Function и созданные таблицы не означают, что консилиум уже выполняется в облаке. До завершения worker и server-side engine adapter интеграция остаётся закрытой для submit.
