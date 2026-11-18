@@ -56,7 +56,8 @@ class PostgresQueueStoreIntegrationTests(unittest.TestCase):
         self.request_id = self._insert_request()
 
     def _insert_request(self):
-        request_id = str(uuid.uuid4())
+        request_uuid = uuid.uuid4()
+        request_id = str(request_uuid)
         with psycopg.connect(DATABASE_URL) as conn:
             conn.execute(
                 """
@@ -67,7 +68,7 @@ class PostgresQueueStoreIntegrationTests(unittest.TestCase):
                         %s, %s, %s)
                 """,
                 (
-                    request_id, self.agent_id, "corr-" + request_id[:8],
+                    request_uuid, self.agent_id, "corr-" + request_id[:8],
                     "idem-" + request_id[:12], "b" * 64,
                     Jsonb({"title": "test", "prompt": "test"}),
                     Jsonb({"max_rounds": 1, "timeout_seconds": 60, "max_output_tokens": 256}),
@@ -91,7 +92,7 @@ class PostgresQueueStoreIntegrationTests(unittest.TestCase):
                 "UPDATE public.yj64_council_api_requests "
                 "SET lease_expires_at = now() - interval '1 second' "
                 "WHERE request_id = %s",
-                (self.request_id,),
+                (uuid.UUID(self.request_id),),
             )
         recovered = self.store.claim("worker-b", 90)
         self.assertEqual(recovered["worker_id"], "worker-b")
@@ -104,7 +105,7 @@ class PostgresQueueStoreIntegrationTests(unittest.TestCase):
             conn.execute(
                 "UPDATE public.yj64_council_api_requests SET cancel_requested = true "
                 "WHERE request_id = %s",
-                (self.request_id,),
+                (uuid.UUID(self.request_id),),
             )
         self.assertTrue(self.store.is_cancelled(self.request_id))
         self.store.mark_cancelled(self.request_id, "worker-a")
@@ -112,7 +113,7 @@ class PostgresQueueStoreIntegrationTests(unittest.TestCase):
             status = conn.execute(
                 "SELECT status, lease_expires_at FROM public.yj64_council_api_requests "
                 "WHERE request_id = %s",
-                (self.request_id,),
+                (uuid.UUID(self.request_id),),
             ).fetchone()
         self.assertEqual(status[0], "cancelled")
         self.assertIsNone(status[1])
@@ -126,7 +127,7 @@ class PostgresQueueStoreIntegrationTests(unittest.TestCase):
             completed = conn.execute(
                 "SELECT status, result->>'outcome' FROM public.yj64_council_api_requests "
                 "WHERE request_id = %s",
-                (second_id,),
+                (uuid.UUID(second_id),),
             ).fetchone()
         self.assertEqual(completed, ("completed", "consensus"))
 
