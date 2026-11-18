@@ -6,7 +6,7 @@ The Council worker is a separate persistent Linux container. Do not run it insid
 
 The first low-risk deployment runs the existing worker container on a Linux VM while retaining the current Supabase Edge Function and PostgreSQL project for API ingress and queue storage. This avoids migrating API, worker and database at the same time.
 
-The worker currently uses Supabase-specific PostgREST and RPC operations. A generic PostgreSQL adapter and self-hosted API are portability milestones, not completed features. See [PORTABILITY.md](PORTABILITY.md).
+The worker now routes persistence through `cloud_worker/queue_store.py`; the active `SupabaseQueueStore` still uses the existing Supabase PostgREST and claim RPC contract. A standard PostgreSQL adapter and self-hosted API are portability milestones, not completed features. See [PORTABILITY.md](PORTABILITY.md).
 
 ## Hosting choice
 
