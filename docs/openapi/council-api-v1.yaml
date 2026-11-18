@@ -1,0 +1,435 @@
+openapi: 3.1.0
+info:
+  title: YJ-64 External Council API
+  version: 1.0.0
+  description: |
+    Application-side API contract aligned to Engineering Core's
+    yj64.council-api.v1 schema. These routes are proposed until implemented.
+servers:
+  - url: https://{host}
+    description: Replace with the verified YJ-64 API deployment origin.
+    variables:
+      host:
+        default: council-api.example.invalid
+security:
+  - MachineBearer: []
+paths:
+  /api/v1/external-agents/council/requests:
+    post:
+      operationId: submitCouncilRequest
+      summary: Submit an asynchronous Council request
+      parameters:
+        - $ref: '#/components/parameters/ProtocolVersion'
+        - $ref: '#/components/parameters/IdempotencyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CouncilRequest'
+      responses:
+        '202':
+          description: Request and queue item have been durably persisted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Idempotency key reused with a different payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: Request payload exceeds configured limit.
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /api/v1/external-agents/council/requests/{request_id}:
+    get:
+      operationId: getCouncilRequestStatus
+      summary: Get execution status and progress
+      parameters:
+        - $ref: '#/components/parameters/ProtocolVersion'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: Current owner-scoped request status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/external-agents/council/requests/{request_id}/result:
+    get:
+      operationId: getCouncilRequestResult
+      summary: Retrieve the validated result of a completed Council run
+      parameters:
+        - $ref: '#/components/parameters/ProtocolVersion'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: Real, validated Council result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CouncilResult'
+        '202':
+          description: Council is not complete; poll the status route.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Request ended without a result (blocked, failed or cancelled).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/external-agents/council/requests/{request_id}/cancel:
+    post:
+      operationId: cancelCouncilRequest
+      summary: Request cancellation of an owned Council run
+      parameters:
+        - $ref: '#/components/parameters/ProtocolVersion'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [protocol_version, agent_id]
+              properties:
+                protocol_version:
+                  const: yj64.council-api.v1
+                agent_id:
+                  $ref: '#/components/schemas/Id'
+      responses:
+        '200':
+          description: Actual terminal state after applying or observing cancellation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CancelResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  securitySchemes:
+    MachineBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: Machine identity token; store and validate server-side, never in a client APK.
+  parameters:
+    ProtocolVersion:
+      name: X-YJ64-Protocol-Version
+      in: header
+      required: true
+      schema:
+        const: yj64.council-api.v1
+    IdempotencyHeader:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 256
+      description: Must equal body idempotency_key.
+    RequestId:
+      name: request_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Id'
+  responses:
+    BadRequest:
+      description: Invalid JSON, protocol version or request schema.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Missing, invalid or expired machine token.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: Token lacks required scope or does not own this request.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Request does not exist or is not visible to this machine identity.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    RateLimited:
+      description: Rate limit exceeded; clients may retry after Retry-After.
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  schemas:
+    Id:
+      type: string
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+    CouncilRequest:
+      type: object
+      additionalProperties: false
+      required: [protocol_version, agent_id, correlation_id, idempotency_key, mode, task, limits, voting]
+      properties:
+        protocol_version:
+          const: yj64.council-api.v1
+        agent_id:
+          $ref: '#/components/schemas/Id'
+        correlation_id:
+          $ref: '#/components/schemas/Id'
+        idempotency_key:
+          type: string
+          minLength: 8
+          maxLength: 256
+        mode:
+          enum: [consensus, critique]
+        task:
+          type: object
+          additionalProperties: false
+          required: [title, prompt, context, evidence_refs]
+          properties:
+            title:
+              type: string
+              minLength: 1
+              maxLength: 500
+            prompt:
+              type: string
+              minLength: 1
+              maxLength: 50000
+            context:
+              type: object
+            evidence_refs:
+              type: array
+              maxItems: 100
+              items:
+                type: string
+                minLength: 1
+                maxLength: 2048
+        limits:
+          type: object
+          additionalProperties: false
+          required: [max_rounds, timeout_seconds, max_output_tokens, minimum_critique_rounds, allow_early_stop]
+          properties:
+            max_rounds:
+              type: integer
+              minimum: 1
+              maximum: 10
+            timeout_seconds:
+              type: integer
+              minimum: 30
+              maximum: 86400
+            max_output_tokens:
+              type: integer
+              minimum: 256
+              maximum: 100000
+            minimum_critique_rounds:
+              const: 1
+            allow_early_stop:
+              type: boolean
+        voting:
+          type: object
+          additionalProperties: false
+          required: [enabled, weighted]
+          properties:
+            enabled:
+              type: boolean
+            weighted:
+              type: boolean
+    Accepted:
+      type: object
+      additionalProperties: false
+      required: [protocol_version, request_id, session_id, status]
+      properties:
+        protocol_version:
+          const: yj64.council-api.v1
+        request_id:
+          $ref: '#/components/schemas/Id'
+        session_id:
+          $ref: '#/components/schemas/Id'
+        status:
+          enum: [accepted, running]
+    StatusResponse:
+      type: object
+      additionalProperties: false
+      required: [protocol_version, request_id, session_id, status]
+      properties:
+        protocol_version:
+          const: yj64.council-api.v1
+        request_id:
+          $ref: '#/components/schemas/Id'
+        session_id:
+          $ref: '#/components/schemas/Id'
+        status:
+          enum: [accepted, running, completed, blocked, failed, cancelled]
+        progress:
+          type: object
+        updated_at:
+          type: string
+          format: date-time
+    CouncilResult:
+      type: object
+      additionalProperties: false
+      required: [protocol_version, request_id, session_id, status, outcome, summary, claims, participant_positions, dissent, evidence, unresolved_questions]
+      properties:
+        protocol_version:
+          const: yj64.council-api.v1
+        request_id:
+          $ref: '#/components/schemas/Id'
+        session_id:
+          $ref: '#/components/schemas/Id'
+        status:
+          const: completed
+        outcome:
+          enum: [consensus, qualified_consensus, unresolved_disagreement, insufficient_evidence]
+        summary:
+          type: string
+          minLength: 1
+          maxLength: 50000
+        claims:
+          type: array
+          items:
+            type: object
+            required: [claim_id, statement, epistemic_type, reasoning, evidence_refs]
+            properties:
+              claim_id: {type: string, minLength: 1}
+              statement: {type: string, minLength: 1}
+              epistemic_type: {enum: [fact, inference, hypothesis, test_result]}
+              reasoning: {type: string}
+              evidence_refs:
+                type: array
+                items: {type: string}
+              confidence: {type: number, minimum: 0, maximum: 1}
+        participant_positions:
+          type: array
+          items:
+            type: object
+            required: [participant_id, position, rationale]
+            properties:
+              participant_id: {type: string}
+              position: {type: string}
+              rationale: {type: string}
+              claim_refs:
+                type: array
+                items: {type: string}
+        dissent:
+          type: array
+          items:
+            type: object
+            required: [participant_id, reason]
+            properties:
+              participant_id: {type: string}
+              reason: {type: string}
+              claim_refs:
+                type: array
+                items: {type: string}
+              evidence_refs:
+                type: array
+                items: {type: string}
+        evidence:
+          type: array
+          items:
+            type: object
+            required: [evidence_id, reference, description, evidence_type]
+            properties:
+              evidence_id: {type: string}
+              reference: {type: string}
+              description: {type: string}
+              evidence_type: {enum: [source, artifact, test, simulation, measurement]}
+              provenance: {type: object}
+        unresolved_questions:
+          type: array
+          items: {type: string}
+        assumptions:
+          type: array
+          items: {type: string}
+        limitations:
+          type: array
+          items: {type: string}
+        rounds_completed:
+          type: integer
+          minimum: 0
+        completion_reason:
+          type: string
+        tests_and_simulations:
+          type: array
+          items: {type: object}
+        voting_summary:
+          type: [object, 'null']
+          additionalProperties: false
+          properties:
+            enabled: {type: boolean}
+            weighted_enabled: {type: boolean}
+            majority_result:
+              enum: [FOR, AGAINST, ABSTAIN, CONDITIONAL, NO_MAJORITY]
+            weighted_result:
+              enum: [FOR, AGAINST, ABSTAIN, CONDITIONAL, NO_MAJORITY]
+            aggregate_counts:
+              type: object
+              additionalProperties:
+                type: integer
+                minimum: 0
+          not:
+            anyOf:
+              - required: [individual_votes]
+              - required: [ballots]
+              - required: [private_ratings]
+              - required: [competence_scores]
+    CancelResponse:
+      type: object
+      additionalProperties: false
+      required: [protocol_version, request_id, status]
+      properties:
+        protocol_version:
+          const: yj64.council-api.v1
+        request_id:
+          $ref: '#/components/schemas/Id'
+        status:
+          enum: [completed, blocked, failed, cancelled]
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+        correlation_id:
+          type: string
