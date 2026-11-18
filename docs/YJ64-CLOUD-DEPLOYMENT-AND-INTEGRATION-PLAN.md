@@ -402,3 +402,10 @@ Acceptance tests:
 - [ ] Повторный CI run должен подтвердить реальную установку, запуск и доставку IPC отчёта.
 - Artifact Run #22: [yj64-android-debug-22](https://github.com/concreteballs/yj64-clean-bial2modFun5/actions/runs/44233515880/artifacts/14397501425) (содержит собранные APK); logs artifact: [yj64-android-build-logs-22](https://github.com/concreteballs/yj64-clean-bial2modFun5/actions/runs/44233515880/artifacts/14397635491).
 
+
+
+### Follow-up fix — run #24
+
+- [x] Обнаружено, что emulator action запускает строки script в отдельных shell-контекстах, поэтому предыдущая попытка с переменными не обеспечивала сохранение shell state.
+- [x] IPC smoke-test переписан в один однострочный вызов `bash -c` с декодированием inline base64: переменные и loop теперь находятся внутри единого Bash process.
+- [ ] Run #24 (`ed2edbbacf206e626080a9dbe5c794278a4cb64d`) ожидает CI результата; это не подтверждение IPC до завершения теста.
