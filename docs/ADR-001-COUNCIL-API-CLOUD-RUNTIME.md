@@ -107,3 +107,14 @@ The worker claims durable jobs using the database lease function, renews leases 
 The engine currently performs independent participant positions, bounded critique rounds, and final structured positions. Outcome is derived from the final explicit verdicts. It does not claim external fact verification. Weighted voting is not implemented; if requested, weighted_enabled is false and the limitation is recorded.
 
 The container and CI tests are implemented. A long-running external host and provider credentials have not been provisioned. Consequently the two Edge Function activation flags remain disabled and submit remains closed. This is an intentional deployment safety gate, not a completed live service.
+
+
+## Council engine and worker implementation — 2026-11-18
+
+The application repository now contains `cloud_worker/engine.py`, a server-side adapter over the existing `llm_api.generate_response` router. The router accepts an optional server-injected `config_override`; the Android app retains its local configuration behavior when no override is supplied. This prevents the cloud worker from depending on an APK or Android app-private directory.
+
+The adapter executes independent participant positions, cross-critique rounds, structured final positions and a public result validator. It requires at least two server-configured participant routes. A result with dissent, conditional/insufficient verdicts or unresolved questions is not labeled unqualified consensus. Provider retries and the full Council lifecycle are deadline-bounded. These tests use mocked model responses and do not represent live provider verification.
+
+A separate persistent Python worker is provided in `cloud_worker/worker.py`, with database claim leases, heartbeat renewal, cancellation checks, retry/recovery and exhausted-attempt handling. The worker container and deployment guide are committed. The existing worker CI compiles the code, runs deterministic unit tests and builds the Docker image.
+
+**Deployment status:** no persistent container host has yet been selected or configured, and no provider or service-role secrets have been provisioned to a worker runtime. Therefore the API readiness gate remains closed. The API is not to be enabled until a real worker heartbeat and an authenticated live Council E2E request/result have been verified.
