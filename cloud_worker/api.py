@@ -83,7 +83,11 @@ def validate_request(value: Any) -> str | None:
         return "unknown_request_field"
     if value.get("protocol_version") != VERSION:
         return "invalid_protocol_version"
-    if not ID_PATTERN.fullmatch(str(value.get("agent_id", ""))) or not ID_PATTERN.fullmatch(str(value.get("correlation_id", ""))):
+    agent_id = value.get("agent_id")
+    correlation_id = value.get("correlation_id")
+    if not isinstance(agent_id, str) or not ID_PATTERN.fullmatch(agent_id):
+        return "invalid_identifier"
+    if not isinstance(correlation_id, str) or not ID_PATTERN.fullmatch(correlation_id):
         return "invalid_identifier"
     idem = value.get("idempotency_key")
     if not isinstance(idem, str) or not 8 <= len(idem) <= 256:
@@ -115,7 +119,12 @@ def validate_request(value: Any) -> str | None:
         ("max_output_tokens", 256, 100000, "invalid_max_output_tokens"),
     ):
         number = limits.get(key)
-        if isinstance(number, bool) or not isinstance(number, int) or not low <= number <= high:
+        if (
+            isinstance(number, bool)
+            or not isinstance(number, (int, float))
+            or not float(number).is_integer()
+            or not low <= number <= high
+        ):
             return error
     if isinstance(limits.get("minimum_critique_rounds"), bool) or limits.get("minimum_critique_rounds") != 1 or not isinstance(limits.get("allow_early_stop"), bool):
         return "invalid_critique_limits"
