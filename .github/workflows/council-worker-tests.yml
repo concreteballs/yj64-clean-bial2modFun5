@@ -20,6 +20,8 @@ on:
       - 'tests/test_cloud_council_engine.py'
       - 'tests/test_cloud_queue_store.py'
       - 'tests/test_cloud_postgres_queue_store.py'
+      - 'tests/test_cloud_api_postgres_integration.py'
+      - 'tests/test_cloud_api.py'
       - '.github/workflows/council-worker-tests.yml'
 
 permissions:
