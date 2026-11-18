@@ -115,7 +115,7 @@ Deno.serve(async (req: Request) => {
   const marker = "/functions/v1/council-api";
   const markerIndex = path.indexOf(marker);
   if (markerIndex >= 0) path = path.slice(markerIndex + marker.length) || "/";
-  if (req.method === "GET" && path === "/health") {
+  if (req.method === "GET" && (path === "/health" || path.endsWith("/health") || url.pathname.endsWith("/health"))) {
     const { error } = await db.from("yj64_council_api_requests").select("request_id").limit(1);
     if (error) return json({ status: "degraded", api: "up", database: "unavailable", council_engine: "not_connected", ready_for_requests: false }, 503);
     return json({ status: "ok", api: "up", database: "up", council_engine: "not_connected", worker: "not_deployed", ready_for_requests: false });
