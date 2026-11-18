@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import os
 import signal
 import socket
@@ -18,6 +19,8 @@ from cloud_worker.engine import CouncilCancelled, CouncilEngine, load_provider_r
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 POLL_SECONDS = max(1, int(os.environ.get("YJ64_WORKER_POLL_SECONDS", "3")))
+# Parallel slots per Render instance; horizontal replicas multiply total capacity.
+WORKER_CONCURRENCY = max(1, min(8, int(os.environ.get("YJ64_WORKER_CONCURRENCY", "2"))))
 LEASE_SECONDS = max(60, min(900, int(os.environ.get("YJ64_WORKER_LEASE_SECONDS", "180"))))
 WORKER_ID = os.environ.get("YJ64_WORKER_ID") or f"{socket.gethostname()}-{uuid.uuid4().hex[:12]}"
 
@@ -74,7 +77,7 @@ def finish_failed(request_id: str, code: str, message: str) -> None:
     }).eq("request_id", request_id).eq("worker_id", WORKER_ID).eq("status", "running").execute()
 
 
-def process(row: dict[str, Any], engine: CouncilEngine) -> None:
+def process(row: dict[str, Any], routes: dict[str, dict[str, str]]) -> None:
     request_id = row["request_id"]
     session_id = row["session_id"]
     finished = threading.Event()
@@ -85,7 +88,8 @@ def process(row: dict[str, Any], engine: CouncilEngine) -> None:
             update_progress(request_id, event)
             if is_cancelled(request_id):
                 raise CouncilCancelled("Cancellation requested")
-        engine.report = report
+        # One engine instance per request prevents progress callbacks/history from crossing chats.
+        engine = CouncilEngine(routes=routes, report=report)
         request = {
             "mode": row["mode"],
             "task": row["task"],
@@ -163,26 +167,45 @@ def publish_heartbeat(status: str, routes: list[str]) -> None:
 def main() -> None:
     # Validate provider secrets before claiming work.
     routes = load_provider_routes()
-    engine = CouncilEngine(routes=routes)
     publish_heartbeat("running", list(routes))
-    print(f"YJ-64 Council worker {WORKER_ID} ready; routes={','.join(routes)}", flush=True)
-    while not stop_event.is_set():
-        try:
-            publish_heartbeat("running", list(routes))
-            fail_exhausted_leases()
-            claimed = db.rpc("yj64_claim_council_api_request", {
-                "p_worker_id": WORKER_ID, "p_lease_seconds": LEASE_SECONDS,
-            }).execute().data or []
-            if not claimed:
-                stop_event.wait(POLL_SECONDS)
-                continue
-            for row in claimed:
-                if stop_event.is_set():
-                    break
-                process(row, engine)
-        except Exception as exc:
-            print(f"worker loop error: {type(exc).__name__}: {str(exc)[:1000]}", flush=True)
-            stop_event.wait(min(30, POLL_SECONDS * 3))
+    print(
+        f"YJ-64 Council worker {WORKER_ID} ready; routes={','.join(routes)}; "
+        f"concurrency={WORKER_CONCURRENCY}",
+        flush=True,
+    )
+    # Each instance processes up to WORKER_CONCURRENCY independent requests.
+    # Additional Render instances claim other rows through the same SKIP LOCKED RPC.
+    with ThreadPoolExecutor(max_workers=WORKER_CONCURRENCY) as executor:
+        active = set()
+        while not stop_event.is_set():
+            try:
+                publish_heartbeat("running", list(routes))
+                fail_exhausted_leases()
+                while not stop_event.is_set() and len(active) < WORKER_CONCURRENCY:
+                    claimed = db.rpc("yj64_claim_council_api_request", {
+                        "p_worker_id": WORKER_ID, "p_lease_seconds": LEASE_SECONDS,
+                    }).execute().data or []
+                    if not claimed:
+                        break
+                    row = claimed[0] if isinstance(claimed, list) else claimed
+                    active.add(executor.submit(process, row, routes))
+                if active:
+                    completed, active = wait(
+                        active, timeout=POLL_SECONDS, return_when=FIRST_COMPLETED
+                    )
+                    for future in completed:
+                        try:
+                            future.result()
+                        except Exception as exc:
+                            print(
+                                f"task execution error: {type(exc).__name__}: {str(exc)[:1000]}",
+                                flush=True,
+                            )
+                else:
+                    stop_event.wait(POLL_SECONDS)
+            except Exception as exc:
+                print(f"worker loop error: {type(exc).__name__}: {str(exc)[:1000]}", flush=True)
+                stop_event.wait(min(30, POLL_SECONDS * 3))
 
 
 def shutdown(_signum: int, _frame: Any) -> None:
