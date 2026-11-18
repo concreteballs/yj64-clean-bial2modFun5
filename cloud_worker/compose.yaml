@@ -1,0 +1,13 @@
+services:
+  council-worker:
+    build:
+      context: ..
+      dockerfile: cloud_worker/Dockerfile
+    image: yj64-council-worker:latest
+    init: true
+    restart: unless-stopped
+    env_file:
+      - .env
+    stop_grace_period: 90s
+    # No public port: the worker only polls the authenticated queue.
+    # Keep the host filesystem out of the container; durable state lives in PostgreSQL.
