@@ -40,8 +40,8 @@ The worker now depends on the `QueueStore` protocol in `cloud_worker/queue_store
 
 1. Run the existing Supabase-backed worker on a free Linux VM. This is the smallest-risk first deployment.
 2. [x] Extract current Supabase calls from `worker.py` into a `QueueStore` interface and preserve behavior with a Supabase implementation.
-3. Add a PostgreSQL implementation using atomic claim transactions (for example, `FOR UPDATE SKIP LOCKED`), lease renewal, cancellation, progress and terminal-state writes.
-4. Add integration tests that run against a disposable PostgreSQL container; compare both adapters against the same contract suite. Current adapter unit tests cover the Supabase compatibility boundary only.
+3. [x] Add a PostgreSQL implementation using atomic claim transactions (`FOR UPDATE SKIP LOCKED`), lease renewal, cancellation, progress, terminal-state writes and worker heartbeat. Standalone schema: `postgres/schema.sql`.
+4. Add integration tests against a disposable PostgreSQL container, including concurrent claims and expired-lease recovery. The CI integration suite is being added; do not treat the adapter as production-validated until that workflow passes.
 5. Containerize the HTTP ingress behind the existing API contract; move off Supabase Edge Functions only after authenticated E2E tests pass.
 6. Verify backup/export/restore, then move database and worker together or independently.
 
