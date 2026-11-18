@@ -11,7 +11,6 @@ import traceback
 import uuid
 from typing import Any
 
-from supabase import create_client
 
 from cloud_worker.engine import CouncilCancelled, CouncilEngine, load_provider_routes
 from cloud_worker.queue_store import PostgresQueueStore, QueueStore, SupabaseQueueStore
@@ -30,6 +29,8 @@ def build_queue_store() -> QueueStore:
     """Create the selected queue adapter from runtime configuration."""
     backend = os.environ.get("YJ64_QUEUE_BACKEND", "supabase").strip().lower()
     if backend == "supabase":
+        from supabase import create_client
+
         url = os.environ.get("SUPABASE_URL", "")
         key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
         if not url or not key:
