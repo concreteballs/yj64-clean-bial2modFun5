@@ -762,3 +762,49 @@ Mock tests не являются доказательством работы р�
 - Не переходить к production rollout, платным ресурсам или необратимым миграциям без отдельного подтверждения владельца.
 
 **Критерий готовности:** внешний агент отправляет реальную задачу; API аутентифицирует и принимает её; запускается настоящий внутренний Council protocol, а не последовательный чат/заглушка; состояние и session linkage сохраняются и восстанавливаются; отмена работает; результат валидируется и возвращается с честным outcome. До подтверждения сквозного live test интеграция считается незавершённой.
+
+### 8.3.11. Фактический аудит готовности Council API — 2026-11-18
+
+Аудит выполнен по текущему `main` обоих репозиториев. Это фиксация фактического состояния, а не отметка API как готового.
+
+#### Подтверждено в YJ-64 application (`concreteballs/yj64-clean-bial2modFun5`)
+
+- Android APK собираются для ARM64 и x86_64; отдельный Monitor APK также собирается.
+- GitHub Actions run **#29** (`c4f16a717de8e774077129902afbabb590ea5e20`) завершился успешно. Эмулятор подтвердил установку и запуск Base и Monitor, а также диагностический IPC Base → Monitor.
+- В приложении есть локальная маршрутизация провайдеров в `llm_api.py`, распределение участников в `message_distributor.py`, пользовательский многомодельный диалог в `main.py` и локальное хранение истории в `chat_workspace.py`.
+- В `services/` пока находится только `internal_monitor.py`. Он реализует Android Content Provider для диагностических отчётов, а не Council HTTP API.
+- В репозитории не обнаружены серверные маршруты Council submit/status/result/cancel, machine authentication, server-side request/session storage, durable Council worker или API deployment entrypoint.
+- Существующий многомодельный диалог и prompt-based Critique не равны формальному Consensus/Critique lifecycle и не могут выдаваться за подтверждённый consensus.
+
+#### Подтверждено в Gateway (`concreteballs/YJ64-Engineering-Core`), только чтение
+
+- Присутствует контракт `schemas/council-api-v1.schema.json` для `yj64.council-api.v1`.
+- Присутствуют Gateway HTTPS client, submit/poll transport, durable task/checkpoint flow и `council_result_ready` consumer.
+- Gateway использует предложенные маршруты:
+  - `POST /api/v1/external-agents/council/requests`
+  - `GET /api/v1/external-agents/council/requests/{request_id}`
+  - `GET /api/v1/external-agents/council/requests/{request_id}/result`
+  - `POST /api/v1/external-agents/council/requests/{request_id}/cancel`
+- Документация и код Gateway прямо указывают, что эти маршруты должны быть реализованы приложением YJ-64; наличие Gateway-клиента не означает наличие сервера на стороне YJ-64.
+- Репозиторий Gateway в рамках этого аудита не изменялся.
+
+#### Статус пакетов раздела 8.3
+
+| Пакет | Статус | Основание / что осталось |
+|---|---|---|
+| 1. Архитектура и контракт | **Частично** | Версия и JSON-контракт уже существуют в Gateway. Не зафиксированы окончательные runtime/service, worker deployment, storage/queue, base URL, secret storage и серверный интерфейс вызова Council. Нужна сверка контракта по фактическим тестам Gateway и утверждение cloud topology. |
+| 2. API, auth и durable intake | **Не начат** | В YJ-64 нет HTTP server, machine identity/scopes, submit/status/result/cancel, durable request/session records и worker. |
+| 3. Настоящий Council lifecycle | **Не начат** | Требуется формальный исполняемый Consensus/Critique protocol поверх существующего router; текущий чат не заменяет этот протокол. |
+| 4. Recovery, retries, cancel | **Не начат** | Нет серверных checkpoint/recovery, идемпотентного lifecycle и owner-scoped cancellation на стороне YJ-64 API. |
+| 5. E2E Gateway ↔ Council | **Заблокирован отсутствием API** | После пакетов 2–4 нужен live test с реальными провайдерами, durable result и возвратом результата к исходной задаче. |
+| 6. Ограниченный rollout | **Не начат** | Зависит от успешного E2E и развёрнутого staging API. |
+
+#### Важное архитектурное уточнение
+
+Android Emulator — тестовая среда для APK, а не публичный или постоянно доступный сервер. Нельзя направлять внешний Gateway на IP/порт эмулятора и считать это развёртыванием API. Council API должен работать в отдельном облачном HTTPS runtime с worker и долговременным хранилищем. Android-приложение остаётся клиентом и интерфейсом; включённость телефона или эмулятора не должна влиять на выполнение Council.
+
+Также нельзя просто перенести текущие локальные API keys из Android router в облачный процесс. Для cloud Council нужны отдельные серверные provider credentials, защищённое хранилище секретов и серверный адаптер к штатному router/session protocol. Ключи не должны попадать в APK, браузерный bundle, Gateway или Git.
+
+#### Следующий разрешённый пакет работ
+
+Продолжить с **Пакета 1**: сверить Gateway schema и тестовые fixtures; зафиксировать runtime для Council API и отдельного worker, persistent storage/queue и deployment topology; определить серверный интерфейс доступа к штатному Council; подготовить ADR и OpenAPI. Только после этого начинать пакет 2. Не создавать mock endpoint, который возвращает фиктивный completed/consensus, и не считать зелёный Android emulator run доказательством API readiness.
