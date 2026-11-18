@@ -1,9 +1,9 @@
 """Queue persistence boundary for the Council worker.
 
-The worker depends on this contract, not on a database SDK. The first
-implementation deliberately preserves the existing Supabase schema/RPC.
-A standard PostgreSQL implementation will be added against the verified
-migration schema; it must pass the same contract tests before activation.
+The worker depends on this contract, not on a database SDK. SupabaseQueueStore
+preserves the existing PostgREST/RPC behavior. PostgresQueueStore targets the
+standalone schema in postgres/schema.sql and uses standard SQL row locking.
+Keep Supabase as the default until API ingress and worker share one database.
 """
 from __future__ import annotations
 
