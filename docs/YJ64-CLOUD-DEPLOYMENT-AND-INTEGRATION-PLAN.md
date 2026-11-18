@@ -938,3 +938,18 @@ OpenAPI сверена с read-only источниками Gateway:
 ### Уточнение транспортного заголовка Supabase
 
 Supabase API Gateway требует публичный project publishable key в заголовке `apikey`, даже когда встроенная JWT-проверка Edge Function отключена. Это не machine credential и не даёт прав на данные: RLS и отсутствие клиентских GRANT остаются обязательными. Заголовок добавлен в OpenAPI. Gateway-клиент должен отправлять оба заголовка: `apikey` (публичный publishable key) и `Authorization: Bearer` (секретный machine token). Текущий Gateway-клиент ранее был проверен только на Bearer token; пока он не отправляет `apikey`, прямой вызов Supabase Edge Function от него не подтверждён.
+
+
+### Smoke test завершён успешно
+
+GitHub Actions workflow `Council API smoke test`, run **#8**, завершился **success**:
+https://github.com/concreteballs/yj64-clean-bial2modFun5/actions/runs/44392591918
+
+Проверено на развёрнутой Edge Function v5:
+- health endpoint возвращает API/database up;
+- readiness честно показывает worker not deployed и engine not connected;
+- без protocol header API отклоняет запрос;
+- неверный machine Bearer token отклоняется;
+- submit без включённого реального worker/engine возвращает `503 council_engine_not_ready`, а не принимает невыполнимую задачу.
+
+Это успешный smoke test транспортного слоя и защитного readiness gate. Это **не** тест реального запуска моделей или E2E с Gateway.
