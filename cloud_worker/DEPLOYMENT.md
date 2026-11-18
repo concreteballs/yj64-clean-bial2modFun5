@@ -52,7 +52,6 @@ Edit `.env` with the two generated database passwords and at least two real prov
 ```dotenv
 YJ64_COUNCIL_ENGINE_ADAPTER=not_ready
 YJ64_COUNCIL_WORKER_ENABLED=false
-YJ64_QUEUE_BACKEND=postgres
 ```
 
 Then start both services:
@@ -106,7 +105,8 @@ The request intake gate is deliberately closed by default. Do not change either 
 - Worker concurrency is bounded by `YJ64_WORKER_CONCURRENCY` (1–8).
 - Leases are renewed while a task is running; expired leases can be reclaimed.
 - PostgreSQL is the source of truth. Container filesystems are disposable.
-- Back up PostgreSQL regularly and test restore before moving hosts.
+- PostgreSQL data persists in the named `yj64-postgres-data` volume. Ordinary `docker compose down` preserves it; **never use `docker compose down -v` unless you intentionally want to delete the database**.
+- Create a backup with `docker compose exec -T postgres pg_dump -U yj64_owner yj64 > yj64-backup.sql`; restore with `cat yj64-backup.sql | docker compose exec -T postgres psql -U yj64_owner -d yj64`. Test restore before moving hosts.
 - On a future paid VPS or self-hosted server, reuse the same OCI image and change only `DATABASE_URL`, provider secrets and reverse-proxy configuration.
 
 ## What CI proves
