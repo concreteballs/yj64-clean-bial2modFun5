@@ -141,46 +141,43 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
           script: |
-            set -eu
-            BASE_APK="bin/blackmirror-0.1.32-x86_64-debug.apk"
-            MONITOR_APK="monitor-app/app/build/outputs/apk/debug/app-debug.apk"
+            bash -euo pipefail -c '
+              adb wait-for-device
+              adb install -r "monitor-app/app/build/outputs/apk/debug/app-debug.apk"
+              adb install -r "bin/blackmirror-0.1.32-x86_64-debug.apk"
+              adb shell am force-stop org.blackmirror.yj64monitor
+              adb shell am force-stop org.blackmirror.blackmirror
+              adb shell monkey -p org.blackmirror.yj64monitor 1
+              sleep 3
+              adb shell monkey -p org.blackmirror.blackmirror 1
 
-            adb wait-for-device
-            adb install -r "$MONITOR_APK"
-            adb install -r "$BASE_APK"
-            adb shell am force-stop org.blackmirror.yj64monitor
-            adb shell am force-stop org.blackmirror.blackmirror
-            adb shell monkey -p org.blackmirror.yj64monitor 1
-            sleep 3
-            adb shell monkey -p org.blackmirror.blackmirror 1
+              RECEIVED=0
+              for attempt in $(seq 1 60); do
+                if adb exec-out run-as org.blackmirror.yj64monitor cat "files/yj64-reports/yj64-report.jsonl" 2>/dev/null | grep -q "\"event\":\"self_diagnostic\""; then
+                  RECEIVED=1
+                  break
+                fi
+                sleep 2
+              done
 
-            REPORT_PATH="files/yj64-reports/yj64-report.jsonl"
-            RECEIVED=0
-            for attempt in $(seq 1 60); do
-              if adb exec-out run-as org.blackmirror.yj64monitor cat "$REPORT_PATH" 2>/dev/null | grep -q '"event":"self_diagnostic"'; then
-                RECEIVED=1
-                break
+              echo "=== Monitor report ==="
+              adb exec-out run-as org.blackmirror.yj64monitor cat "files/yj64-reports/yj64-report.jsonl" || true
+              echo "=== Process state ==="
+              adb shell pidof org.blackmirror.blackmirror || true
+              adb shell pidof org.blackmirror.yj64monitor || true
+              echo "=== Relevant logcat ==="
+              adb logcat -d -t 5000 | grep -E "AndroidRuntime|Python|python|blackmirror|yj64|FATAL EXCEPTION" | tail -n 250 || true
+
+              if [ "$RECEIVED" -ne 1 ]; then
+                echo "Base diagnostic report did not reach Monitor through Content Provider IPC." >&2
+                exit 1
               fi
-              sleep 2
-            done
 
-            echo "=== Monitor report ==="
-            adb exec-out run-as org.blackmirror.yj64monitor cat "$REPORT_PATH" || true
-            echo "=== Process state ==="
-            adb shell pidof org.blackmirror.blackmirror || true
-            adb shell pidof org.blackmirror.yj64monitor || true
-            echo "=== Relevant logcat ==="
-            adb logcat -d -t 5000 | grep -E "AndroidRuntime|Python|python|blackmirror|yj64|FATAL EXCEPTION" | tail -n 250 || true
-
-            if [ "$RECEIVED" -ne 1 ]; then
-              echo "Base diagnostic report did not reach Monitor through Content Provider IPC." >&2
-              exit 1
-            fi
-
-            REPORT="$(adb exec-out run-as org.blackmirror.yj64monitor cat "$REPORT_PATH")"
-            echo "$REPORT" | grep -q '"event":"internal_startup"'
-            echo "$REPORT" | grep -q '"event":"internal_service_ready"'
-            echo "PASS: Base reports were durably received by Monitor over Android Content Provider IPC."
+              REPORT=$(adb exec-out run-as org.blackmirror.yj64monitor cat "files/yj64-reports/yj64-report.jsonl")
+              echo "$REPORT" | grep -q "\"event\":\"internal_startup\""
+              echo "$REPORT" | grep -q "\"event\":\"internal_service_ready\""
+              echo "PASS: Base reports were durably received by Monitor over Android Content Provider IPC."
+            '
 
       - name: Verify APK outputs
         run: |
