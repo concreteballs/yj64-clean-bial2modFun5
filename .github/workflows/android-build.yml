@@ -106,13 +106,13 @@ jobs:
         run: |
           set -euo pipefail
           cp buildozer.spec buildozer.spec.guard-backup
-          restore_spec() {
-            cp buildozer.spec.guard-backup buildozer.spec
-            rm -f buildozer.spec.guard-backup
-          }
-          trap restore_spec EXIT
+          trap 'cp buildozer.spec.guard-backup buildozer.spec; rm -f buildozer.spec.guard-backup' EXIT
           sed -i 's/^android.archs = arm64-v8a$/android.archs = x86_64/' buildozer.spec
-          grep -q '^android.archs = x86_64
+          buildozer android debug
+          test -s bin/blackmirror-0.1.32-x86_64-debug.apk
+          cp buildozer.spec.guard-backup buildozer.spec
+          rm -f buildozer.spec.guard-backup
+          trap - EXIT
 
       - name: Install Monitor Android SDK components
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
