@@ -900,7 +900,7 @@ OpenAPI сверена с read-only источниками Gateway:
 
 Развёрнута Supabase Edge Function:
 - Slug: `council-api`.
-- Версия: 2.
+- Версия: 5.
 - Статус: ACTIVE.
 - Встроенная JWT-проверка Supabase отключена намеренно, поскольку Gateway использует собственный machine Bearer token; сама функция проверяет SHA-256 token hash, identity и scopes.
 - URL base: `https://ggambesixwejgbjwtnhw.supabase.co/functions/v1/council-api`.
