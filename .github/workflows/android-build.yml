@@ -123,6 +123,15 @@ jobs:
       - name: Verify standalone Monitor APK
         run: test -s monitor-app/app/build/outputs/apk/debug/app-debug.apk
 
+      - name: Enable KVM acceleration for Android emulator
+        run: |
+          if [ ! -e /dev/kvm ]; then
+            echo "KVM device is unavailable on this runner." >&2
+            exit 1
+          fi
+          sudo chmod 666 /dev/kvm
+          emulator -accel-check
+
       - name: Boot virtual Android and test Base ↔ Monitor IPC
         uses: reactivecircus/android-emulator-runner@v2
         with:
