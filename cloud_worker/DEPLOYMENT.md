@@ -1,86 +1,122 @@
-# YJ-64 Council Worker — deployment
+# YJ-64 Council — standalone server deployment
 
-The Council worker is a separate persistent Linux container. Do not run it inside the Android APK or a Supabase Edge Function.
+The repository contains a portable HTTP API and persistent worker. Both use one standard PostgreSQL database; neither requires Supabase at runtime.
 
-## Current deployment model
+## Components
 
-The repository now contains a standalone FastAPI ingress (`cloud_worker/api.py`) and PostgreSQL worker adapter. The standalone Compose stack runs both containers against one PostgreSQL database. Keep the existing Supabase Edge Function deployment as a fallback until the standalone stack passes its full authenticated end-to-end acceptance test.
+- `cloud_worker/api.py` — FastAPI ingress implementing `yj64.council-api.v1`.
+- `cloud_worker/worker.py` — persistent Council execution worker.
+- `cloud_worker/queue_store.py` — Supabase compatibility and standard PostgreSQL adapters.
+- `cloud_worker/postgres/schema.sql` — standalone database schema.
+- `cloud_worker/compose.yaml` — API and worker containers using the same image and database.
 
-The worker routes persistence through `cloud_worker/queue_store.py`. The standalone API and worker both use `DATABASE_URL`; the worker selects `YJ64_QUEUE_BACKEND=postgres`. Do not run a PostgreSQL worker against the Supabase Edge Function or a Supabase worker against the standalone API: each pair must share one database. See [PORTABILITY.md](PORTABILITY.md).
+The previous Supabase Edge Function remains a separate fallback deployment. Never connect a Supabase Edge Function to a PostgreSQL-backed worker, or the standalone API to a Supabase-backed worker: API and worker must share the same queue database.
 
-## Hosting choice
+## Free hosting target
 
-- **Primary free candidate: Oracle Cloud Always Free VM.** The official Always Free allowance currently includes up to 2 OCPUs / 12 GB RAM equivalent for Ampere A1 and 200 GB total block storage. It is ARM64; build and verify the image for linux/arm64. Capacity is not guaranteed in every home region and idle compute may be reclaimed. Check current account limits before provisioning.
-- **Secondary: Google Cloud e2-micro Free Tier.** One VM is free only in specified US regions, with 30 GB-month standard disk and 1 GB monthly outbound transfer. A billing account is required and overages are billable. It is a small test/fallback, not the preferred host.
-- **Render Free is not suitable for the persistent worker.** Free Web Services sleep after 15 minutes, have no persistent disk and Render does not offer free Background Worker instances. A Render Background Worker requires a paid compute plan.
+Oracle Cloud Always Free ARM64 VM remains the primary candidate, subject to regional capacity and current account eligibility. The Docker image is built for both `linux/amd64` and `linux/arm64`. Google Cloud's small e2-micro free tier is a fallback for limited testing. Render Free is not suitable for a persistent worker.
 
-Always re-check provider limits at provisioning time:
+Re-check official limits before creating an instance:
 - https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm
 - https://docs.cloud.google.com/free/docs/free-cloud-features
 - https://render.com/docs/free
 - https://render.com/docs/background-workers
 
-## Build and run
+## PostgreSQL preparation
 
-Build from repository root (Compose builds the same image for API and worker):
+Use PostgreSQL 16 or newer. Create a database owner role and a separate runtime role. Run these commands in an administrative `psql` session, replacing the password with a long random secret:
 
-```sh
-docker build -f cloud_worker/Dockerfile -t yj64-council-worker:latest .
+```sql
+CREATE ROLE yj64_owner NOLOGIN;
+CREATE ROLE yj64_runtime LOGIN PASSWORD 'REPLACE_WITH_RANDOM_PASSWORD';
+CREATE DATABASE yj64 OWNER yj64_owner;
+connect yj64
+SET ROLE yj64_owner;
+i cloud_worker/postgres/schema.sql
+GRANT USAGE ON SCHEMA public TO yj64_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO yj64_runtime;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO yj64_runtime;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO yj64_runtime;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT USAGE, SELECT ON SEQUENCES TO yj64_runtime;
 ```
+
+Run the schema file from the repository root, or adjust the `\i` path to the file's absolute location. URL-encode reserved characters in the database password used by `DATABASE_URL`.
+
+## Configure and start
 
 On the Linux VM:
 
 ```sh
-cd cloud_worker
+git clone https://github.com/concreteballs/yj64-clean-bial2modFun5.git
+cd yj64-clean-bial2modFun5/cloud_worker
 cp .env.example .env
-# Edit .env and insert real server-side credentials using a secure editor.
-docker compose -f compose.yaml up -d --build
-docker compose -f compose.yaml logs -f
-```
-
-Protect `.env`:
-
-```sh
 chmod 600 .env
 ```
 
-Do not commit `.env`, copy it into a public artifact, or paste secrets into logs or chat. Use a host secret manager or root-readable environment file where available.
+Edit `.env` with the PostgreSQL connection string and at least two real provider routes. The example contains placeholders only. Keep these initial gate values unchanged:
 
-## Required runtime secrets
+```dotenv
+YJ64_COUNCIL_ENGINE_ADAPTER=not_ready
+YJ64_COUNCIL_WORKER_ENABLED=false
+YJ64_QUEUE_BACKEND=postgres
+```
 
-- `SUPABASE_URL`: current project URL.
-- `SUPABASE_SERVICE_ROLE_KEY`: server-only service-role key.
-- `YJ64_COUNCIL_PROVIDER_CONFIG`: JSON object with at least two configured provider routes.
+Then start both services:
 
-The repository's `.env.example` contains placeholder values only. Real provider credentials must be provisioned separately.
+```sh
+docker compose -f compose.yaml up -d --build
+docker compose -f compose.yaml ps
+docker compose -f compose.yaml logs -f
+```
 
-Optional:
-- `YJ64_WORKER_POLL_SECONDS` (default 3)
-- `YJ64_WORKER_LEASE_SECONDS` (default 180; allowed 60–900)
-- `YJ64_WORKER_ID` (generated uniquely if omitted)
-- `YJ64_WORKER_CONCURRENCY` (default 2; bounded 1–8)
+The API binds only to `127.0.0.1:8080`. Put an HTTPS reverse proxy (for example, Caddy or Nginx) in front of it, enable request rate limiting, and expose only HTTPS publicly. Do not expose port 8080 directly. The worker has no inbound port.
 
-## Activation sequence
+Health endpoint: `GET http://127.0.0.1:8080/health`. It reports API/database status and whether a live worker heartbeat exists. The API may be healthy while request intake is intentionally disabled.
 
-1. Provision a Linux VM and restrict inbound firewall rules. The worker itself needs no public inbound port.
-2. Install Docker Engine and the Compose plugin from the OS vendor's supported packages.
-3. Add secrets to the host; set file permissions to owner-only.
-4. Start exactly one worker instance initially.
-5. Confirm logs show the worker ready message and the Supabase table `yj64_council_api_workers` receives fresh heartbeats.
-6. Confirm API health reports a live worker.
-7. Run a controlled authenticated test with real provider routes, then test cancellation, lease recovery and terminal result persistence.
-8. Keep the API submit gate closed until the entire live E2E lifecycle is verified.
+## Agent credentials
 
-Do not enable `YJ64_COUNCIL_ENGINE_ADAPTER=ready` or `YJ64_COUNCIL_WORKER_ENABLED=true` before the worker heartbeat, real provider E2E, cancellation, lease recovery and result persistence are verified.
+The API accepts bearer tokens whose SHA-256 hashes are stored in `yj64_council_api_agents.token_hash`. Generate a unique token on a trusted machine:
 
-## Standalone PostgreSQL backend
+```sh
+TOKEN="$(openssl rand -hex 32)"
+printf '%s' "$TOKEN" | sha256sum
+```
 
-The standalone API always uses `DATABASE_URL`; the worker uses that same value with `YJ64_QUEUE_BACKEND=postgres`. Apply `cloud_worker/postgres/schema.sql` before starting either service. The old Supabase Edge Function remains a separate deployment path and must only be paired with the Supabase-backed worker.
+Insert the resulting 64-character hash using an owner-only SQL session. Example:
 
-## Moving to paid or self-hosted infrastructure
+```sql
+INSERT INTO public.yj64_council_api_agents (agent_id, token_hash, scopes, enabled)
+VALUES (
+  'your-agent-id',
+  'PASTE_SHA256_HASH_HERE',
+  ARRAY['council:submit', 'council:read', 'council:cancel'],
+  true
+);
+```
 
-The same OCI image and environment contract should be reused. Export PostgreSQL, restore into the target PostgreSQL instance, verify row counts and representative task histories, then switch `DATABASE_URL`. Do not couple application logic to Oracle, Google Cloud, Render or any host-specific API.
+Keep the raw token only in the authorized client secret store. Do not commit it, place it in a public file, or send it in chat. Disable an agent by setting `enabled = false`.
+
+## API contract
+
+All requests require `x-yj64-protocol-version: yj64.council-api.v1` and a bearer token with the corresponding scope.
+
+- `POST /api/v1/external-agents/council/requests` — submit (also requires matching `Idempotency-Key` header).
+- `GET /api/v1/external-agents/council/requests/{request_id}` — status.
+- `GET /api/v1/external-agents/council/requests/{request_id}/result` — validated result.
+- `POST /api/v1/external-agents/council/requests/{request_id}/cancel` — cancel.
+
+The request intake gate is deliberately closed by default. Do not change either gate variable to `ready/true` until the API and worker share the same database, at least two real provider routes work, and authenticated submit → execute → status → result plus cancellation and lease-recovery tests have passed.
+
+## Operations and migration
+
+- Worker concurrency is bounded by `YJ64_WORKER_CONCURRENCY` (1–8).
+- Leases are renewed while a task is running; expired leases can be reclaimed.
+- PostgreSQL is the source of truth. Container filesystems are disposable.
+- Back up PostgreSQL regularly and test restore before moving hosts.
+- On a future paid VPS or self-hosted server, reuse the same OCI image and change only `DATABASE_URL`, provider secrets and reverse-proxy configuration.
 
 ## What CI proves
 
-The Council Worker CI workflow compiles the router, worker and API; runs deterministic engine/API tests plus queue and HTTP contract integration tests against disposable PostgreSQL 16; and builds AMD64 and ARM64 OCI images. A passing run validates the tested contracts, not real provider credentials, cloud provisioning, billing, backups or production uptime.
+The workflow compiles the API and worker, runs deterministic engine/API tests, queue adapter tests, and PostgreSQL integration tests against a disposable PostgreSQL 16 service, then builds AMD64 and ARM64 OCI images. A passing CI run does not prove live provider credentials, server provisioning, HTTPS configuration, backups or production uptime.
