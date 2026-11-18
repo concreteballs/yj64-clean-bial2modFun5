@@ -6,7 +6,7 @@ The Council worker is a separate persistent Linux container. Do not run it insid
 
 The first low-risk deployment runs the existing worker container on a Linux VM while retaining the current Supabase Edge Function and PostgreSQL project for API ingress and queue storage. This avoids migrating API, worker and database at the same time.
 
-The worker now routes persistence through `cloud_worker/queue_store.py`; the active `SupabaseQueueStore` still uses the existing Supabase PostgREST and claim RPC contract. A standard PostgreSQL adapter and self-hosted API are portability milestones, not completed features. See [PORTABILITY.md](PORTABILITY.md).
+The worker now routes persistence through `cloud_worker/queue_store.py`. Both `SupabaseQueueStore` and `PostgresQueueStore` are implemented. The PostgreSQL adapter uses the standalone schema at `cloud_worker/postgres/schema.sql` and standard atomic row locking. However, the current Supabase Edge Function still writes to the Supabase database: do not select `YJ64_QUEUE_BACKEND=postgres` until the API ingress is also pointed at the same standalone PostgreSQL database. The worker and API must never read/write separate queues. See [PORTABILITY.md](PORTABILITY.md).
 
 ## Hosting choice
 
@@ -72,6 +72,10 @@ Optional:
 8. Keep the API submit gate closed until the entire live E2E lifecycle is verified.
 
 Do not enable `YJ64_COUNCIL_ENGINE_ADAPTER=ready` or `YJ64_COUNCIL_WORKER_ENABLED=true` before the worker heartbeat, real provider E2E, cancellation, lease recovery and result persistence are verified.
+
+## Standalone PostgreSQL backend
+
+The portable worker backend is selected with `YJ64_QUEUE_BACKEND=postgres` and `DATABASE_URL`. Apply `cloud_worker/postgres/schema.sql` to the target PostgreSQL database before starting the worker. Keep `YJ64_QUEUE_BACKEND=supabase` for the current hosted Edge Function deployment. Switching only the worker is unsafe: the existing Edge Function must first be migrated or replaced so that intake, status, cancellation and result reads all use this same PostgreSQL database. The PostgreSQL backend is not activated by default.
 
 ## Moving to paid or self-hosted infrastructure
 
