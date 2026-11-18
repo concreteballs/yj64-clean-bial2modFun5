@@ -1,0 +1,4 @@
+project_id = "ggambesixwejgbjwtnhw"
+
+[functions.council-api]
+verify_jwt = false
