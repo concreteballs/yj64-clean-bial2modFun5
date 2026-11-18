@@ -1,4 +1,24 @@
 services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${YJ64_POSTGRES_DB:-yj64}
+      POSTGRES_USER: ${YJ64_POSTGRES_USER:-yj64_runtime}
+      POSTGRES_PASSWORD: ${YJ64_POSTGRES_PASSWORD:?Set YJ64_POSTGRES_PASSWORD in .env}
+    volumes:
+      - yj64-postgres-data:/var/lib/postgresql/data
+      - ./postgres/schema.sql:/docker-entrypoint-initdb.d/01-yj64-schema.sql:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    # No host port: PostgreSQL is reachable only on the private Compose network.
+
   council-worker:
     build:
       context: ..
@@ -10,6 +30,10 @@ services:
       - .env
     environment:
       YJ64_QUEUE_BACKEND: postgres
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
     stop_grace_period: 90s
     # No public inbound port: worker claims jobs from the shared PostgreSQL queue.
 
@@ -31,11 +55,14 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      YJ64_API_DB_POOL_SIZE: ${YJ64_API_DB_POOL_SIZE:-8}
     ports:
       - "127.0.0.1:8080:8080"
-    environment:
-      YJ64_API_DB_POOL_SIZE: ${YJ64_API_DB_POOL_SIZE:-8}
     depends_on:
+      postgres:
+        condition: service_healthy
       council-worker:
         condition: service_started
     healthcheck:
@@ -48,3 +75,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+
+volumes:
+  yj64-postgres-data:
