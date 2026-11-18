@@ -14,6 +14,8 @@ security:
 paths:
   /health:
     get:
+      parameters:
+        - $ref: '#/components/parameters/SupabasePublishableKey'
       operationId: getCouncilApiHealth
       summary: Check API and database health without revealing secrets
       security: []
@@ -96,6 +98,8 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/v1/external-agents/council/requests/{request_id}/result:
     get:
+      parameters:
+        - $ref: '#/components/parameters/SupabasePublishableKey'
       operationId: getCouncilRequestResult
       summary: Retrieve the validated result of a completed Council run
       parameters:
@@ -128,6 +132,8 @@ paths:
                 $ref: '#/components/schemas/Error'
   /api/v1/external-agents/council/requests/{request_id}/cancel:
     post:
+      parameters:
+        - $ref: '#/components/parameters/SupabasePublishableKey'
       operationId: cancelCouncilRequest
       summary: Request cancellation of an owned Council run
       parameters:
