@@ -24,25 +24,17 @@ Re-check official limits before creating an instance:
 
 ## PostgreSQL preparation
 
-Use PostgreSQL 16 or newer. Create a database owner role and a separate runtime role. Run these commands in an administrative `psql` session, replacing the password with a long random secret:
+The Compose stack includes PostgreSQL 16 with a persistent named volume. On the first database initialization, Docker mounts `cloud_worker/postgres/schema.sql` into the official PostgreSQL initialization directory and creates the schema automatically. PostgreSQL is not published on a host port; only the API's loopback port is exposed.
 
-```sql
-CREATE ROLE yj64_owner NOLOGIN;
-CREATE ROLE yj64_runtime LOGIN PASSWORD 'REPLACE_WITH_RANDOM_PASSWORD';
-CREATE DATABASE yj64 OWNER yj64_owner;
-connect yj64
-SET ROLE yj64_owner;
-i cloud_worker/postgres/schema.sql
-GRANT USAGE ON SCHEMA public TO yj64_runtime;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO yj64_runtime;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO yj64_runtime;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO yj64_runtime;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-  GRANT USAGE, SELECT ON SEQUENCES TO yj64_runtime;
+Set a URL-safe random password (hex characters avoid connection-string escaping problems):
+
+```sh
+openssl rand -hex 32
 ```
 
-Run the schema file from the repository root, or adjust the `\i` path to the file's absolute location. URL-encode reserved characters in the database password used by `DATABASE_URL`.
+Put the generated value in `YJ64_POSTGRES_PASSWORD` in `.env`. Compose constructs the internal `DATABASE_URL` for both API and worker using the private service name `postgres`.
+
+For an existing or externally managed PostgreSQL database, apply `cloud_worker/postgres/schema.sql` manually before starting API/worker and adjust the Compose `DATABASE_URL` environment expression for that database. Keep API and worker pointed at the exact same database.
 
 ## Configure and start
 
