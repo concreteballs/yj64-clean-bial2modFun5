@@ -135,13 +135,17 @@ def process(row: dict[str, Any], engine: CouncilEngine) -> None:
 
 
 def fail_exhausted_leases() -> None:
-    # Do not leave tasks permanently in running after their final crashed attempt.
     now = utc_now()
-    db.table("yj64_council_api_requests").update({
-        "status": "failed", "error_code": "worker_retries_exhausted",
-        "error_message": "Worker lease expired after the maximum number of attempts.",
-        "completed_at": now, "updated_at": now, "lease_expires_at": None,
-    }).eq("status", "running").lt("attempts", 1000000).lt("attempts", 3).lt("lease_expires_at", now).execute()
+    expired = db.table("yj64_council_api_requests").select(
+        "request_id,attempts,max_attempts"
+    ).eq("status", "running").lt("lease_expires_at", now).execute().data or []
+    for row in expired:
+        if int(row["attempts"]) >= int(row["max_attempts"]):
+            db.table("yj64_council_api_requests").update({
+                "status": "failed", "error_code": "worker_retries_exhausted",
+                "error_message": "Worker lease expired after the maximum number of attempts.",
+                "completed_at": now, "updated_at": now, "lease_expires_at": None,
+            }).eq("request_id", row["request_id"]).eq("status", "running").execute()
 
 
 def main() -> None:
