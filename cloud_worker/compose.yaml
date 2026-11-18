@@ -4,11 +4,14 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${YJ64_POSTGRES_DB:-yj64}
-      POSTGRES_USER: ${YJ64_POSTGRES_USER:-yj64_runtime}
-      POSTGRES_PASSWORD: ${YJ64_POSTGRES_PASSWORD:?Set YJ64_POSTGRES_PASSWORD in .env}
+      POSTGRES_USER: yj64_owner
+      POSTGRES_PASSWORD: ${YJ64_POSTGRES_OWNER_PASSWORD:?Set YJ64_POSTGRES_OWNER_PASSWORD in .env}
+      YJ64_POSTGRES_PASSWORD: ${YJ64_POSTGRES_PASSWORD:?Set YJ64_POSTGRES_PASSWORD in .env}
     volumes:
       - yj64-postgres-data:/var/lib/postgresql/data
+      - ./postgres/00-runtime-role.sql:/docker-entrypoint-initdb.d/00-runtime-role.sql:ro
       - ./postgres/schema.sql:/docker-entrypoint-initdb.d/01-yj64-schema.sql:ro
+      - ./postgres/02-runtime-grants.sql:/docker-entrypoint-initdb.d/02-runtime-grants.sql:ro
     healthcheck:
       test:
         - CMD-SHELL
@@ -28,7 +31,7 @@ services:
     restart: unless-stopped
     environment:
       YJ64_QUEUE_BACKEND: postgres
-      DATABASE_URL: postgresql://${YJ64_POSTGRES_USER:-yj64_runtime}:${YJ64_POSTGRES_PASSWORD:?Set YJ64_POSTGRES_PASSWORD in .env}@postgres:5432/${YJ64_POSTGRES_DB:-yj64}
+      DATABASE_URL: postgresql://yj64_runtime:${YJ64_POSTGRES_PASSWORD:?Set YJ64_POSTGRES_PASSWORD in .env}@postgres:5432/${YJ64_POSTGRES_DB:-yj64}
       YJ64_DB_POOL_SIZE: ${YJ64_DB_POOL_SIZE:-12}
       YJ64_COUNCIL_PROVIDER_CONFIG: ${YJ64_COUNCIL_PROVIDER_CONFIG:?Set at least two provider routes in .env}
       YJ64_WORKER_POLL_SECONDS: ${YJ64_WORKER_POLL_SECONDS:-3}
@@ -58,7 +61,7 @@ services:
     init: true
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql://${YJ64_POSTGRES_USER:-yj64_runtime}:${YJ64_POSTGRES_PASSWORD:?Set YJ64_POSTGRES_PASSWORD in .env}@postgres:5432/${YJ64_POSTGRES_DB:-yj64}
+      DATABASE_URL: postgresql://yj64_runtime:${YJ64_POSTGRES_PASSWORD:?Set YJ64_POSTGRES_PASSWORD in .env}@postgres:5432/${YJ64_POSTGRES_DB:-yj64}
       YJ64_API_DB_POOL_SIZE: ${YJ64_API_DB_POOL_SIZE:-8}
       YJ64_COUNCIL_ENGINE_ADAPTER: ${YJ64_COUNCIL_ENGINE_ADAPTER:-not_ready}
       YJ64_COUNCIL_WORKER_ENABLED: ${YJ64_COUNCIL_WORKER_ENABLED:-false}
