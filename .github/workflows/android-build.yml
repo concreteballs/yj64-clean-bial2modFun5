@@ -28,10 +28,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Guard, Python checks and Android APK
+  build-and-emulator-test:
+    name: Build APKs and test on virtual Android
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 150
     env:
       PYTHONUNBUFFERED: "1"
       P4A_PREREQUISITES_INSTALL_INTERACTIVE: "0"
@@ -117,9 +117,13 @@ jobs:
       - name: Run diagnostic spool unit tests
         run: python -m unittest discover -s tests -v
 
-      - name: Build debug APK
+      - name: Build debug APKs (arm64 + x86_64)
         run: |
           buildozer android debug
+          echo "Generated APKs:"
+          find bin -maxdepth 1 -type f -name '*.apk' -print
+          test -s bin/blackmirror-0.1.32-arm64-v8a-debug.apk
+          test -s bin/blackmirror-0.1.32-x86_64-debug.apk
 
       - name: Install Monitor Android SDK components
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
@@ -132,9 +136,59 @@ jobs:
           test -s monitor-app/app/build/outputs/apk/debug/app-debug.apk
           file monitor-app/app/build/outputs/apk/debug/app-debug.apk
 
+      - name: Boot virtual Android and test Base ↔ Monitor IPC
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+          script: |
+            set -euo pipefail
+            BASE_APK="bin/blackmirror-0.1.32-x86_64-debug.apk"
+            MONITOR_APK="monitor-app/app/build/outputs/apk/debug/app-debug.apk"
+
+            adb wait-for-device
+            adb install -r "$MONITOR_APK"
+            adb install -r "$BASE_APK"
+
+            adb shell am force-stop org.blackmirror.yj64monitor
+            adb shell am force-stop org.blackmirror.blackmirror
+            adb shell monkey -p org.blackmirror.yj64monitor 1
+            sleep 3
+            adb shell monkey -p org.blackmirror.blackmirror 1
+
+            REPORT_PATH="files/yj64-reports/yj64-report.jsonl"
+            RECEIVED=0
+            for attempt in $(seq 1 60); do
+              if adb exec-out run-as org.blackmirror.yj64monitor cat "$REPORT_PATH" 2>/dev/null | grep -q '"event":"self_diagnostic"'; then
+                RECEIVED=1
+                break
+              fi
+              sleep 2
+            done
+
+            echo "=== Monitor report from private app storage ==="
+            adb exec-out run-as org.blackmirror.yj64monitor cat "$REPORT_PATH" || true
+            echo "=== Base and Monitor process state ==="
+            adb shell pidof org.blackmirror.blackmirror || true
+            adb shell pidof org.blackmirror.yj64monitor || true
+            echo "=== Relevant logcat ==="
+            adb logcat -d -t 5000 | grep -E "AndroidRuntime|Python|python|blackmirror|yj64|FATAL EXCEPTION" | tail -n 250 || true
+
+            if [ "$RECEIVED" -ne 1 ]; then
+              echo "Base diagnostic report did not reach Monitor through Content Provider IPC." >&2
+              exit 1
+            fi
+
+            REPORT="$(adb exec-out run-as org.blackmirror.yj64monitor cat "$REPORT_PATH")"
+            echo "$REPORT" | grep -q '"event":"internal_startup"'
+            echo "$REPORT" | grep -q '"event":"internal_service_ready"'
+            echo "PASS: Base reports were durably received by Monitor over Android Content Provider IPC."
+
       - name: Verify APK output
-        id: apk
-        shell: bash
         run: |
           mapfile -t apks < <(find bin -type f -name '*.apk' -print)
           if [ "${#apks[@]}" -eq 0 ]; then
@@ -145,14 +199,15 @@ jobs:
           printf '%s\n' "${apks[@]}"
           echo "count=${#apks[@]}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload debug APK
+      - name: Upload debug APKs and emulator test logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: yj64-android-debug-${{ github.run_number }}
           path: |
             bin/*.apk
             monitor-app/app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 7
 
       - name: Upload build logs on failure
