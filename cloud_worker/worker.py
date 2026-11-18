@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+import atexit
 import os
 import signal
 import socket
@@ -14,10 +15,8 @@ from typing import Any
 from supabase import create_client
 
 from cloud_worker.engine import CouncilCancelled, CouncilEngine, load_provider_routes
-from cloud_worker.queue_store import QueueStore, SupabaseQueueStore
+from cloud_worker.queue_store import PostgresQueueStore, QueueStore, SupabaseQueueStore
 
-SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 POLL_SECONDS = max(1, int(os.environ.get("YJ64_WORKER_POLL_SECONDS", "3")))
 WORKER_CONCURRENCY = max(1, min(8, int(os.environ.get("YJ64_WORKER_CONCURRENCY", "2"))))
 LEASE_SECONDS = max(60, min(900, int(os.environ.get("YJ64_WORKER_LEASE_SECONDS", "180"))))
@@ -31,13 +30,17 @@ runtime_routes: list[str] = []
 def build_queue_store() -> QueueStore:
     """Select the compatibility adapter until another adapter is explicitly configured."""
     backend = os.environ.get("YJ64_QUEUE_BACKEND", "supabase").strip().lower()
-    if backend != "supabase":
-        raise RuntimeError(
-            f"Unsupported YJ64_QUEUE_BACKEND={backend!r}; only the verified "
-            "Supabase adapter is currently available"
-        )
-    client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-    return SupabaseQueueStore(client)
+    if backend == "supabase":
+        url = os.environ.get("SUPABASE_URL", "")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+        if not url or not key:
+            raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for the Supabase backend")
+        return SupabaseQueueStore(create_client(url, key))
+    if backend == "postgres":
+        conninfo = os.environ.get("DATABASE_URL", "")
+        pool_size = int(os.environ.get("YJ64_DB_POOL_SIZE", "12"))
+        return PostgresQueueStore(conninfo, max_size=pool_size)
+    raise RuntimeError(f"Unsupported YJ64_QUEUE_BACKEND={backend!r}; use 'supabase' or 'postgres'")
 
 
 def heartbeat(
@@ -113,6 +116,9 @@ def main() -> None:
     store = build_queue_store()
     runtime_store = store
     runtime_routes = list(routes)
+    close_store = getattr(store, 'close', None)
+    if callable(close_store):
+        atexit.register(close_store)
     store.publish_heartbeat(WORKER_ID, "running", list(routes))
     print(
         f"YJ-64 Council worker {WORKER_ID} ready; routes={','.join(routes)}; "
