@@ -9,6 +9,8 @@ on:
       - 'tests/test_cloud_council_engine.py'
       - 'tests/test_cloud_queue_store.py'
       - 'tests/test_cloud_postgres_queue_store.py'
+      - 'tests/test_cloud_api.py'
+      - 'tests/test_cloud_api_postgres_integration.py'
       - '.github/workflows/council-worker-tests.yml'
   push:
     branches: [main]
@@ -53,13 +55,17 @@ jobs:
       - name: Install pinned worker dependencies
         run: python -m pip install -r cloud_worker/requirements.txt
       - name: Compile worker and shared provider router
-        run: python -m py_compile llm_api.py cloud_worker/engine.py cloud_worker/queue_store.py cloud_worker/worker.py tests/test_cloud_council_engine.py tests/test_cloud_queue_store.py tests/test_cloud_postgres_queue_store.py
+        run: python -m py_compile llm_api.py cloud_worker/engine.py cloud_worker/queue_store.py cloud_worker/worker.py cloud_worker/api.py tests/test_cloud_council_engine.py tests/test_cloud_queue_store.py tests/test_cloud_postgres_queue_store.py tests/test_cloud_api.py tests/test_cloud_api_postgres_integration.py
       - name: Run cloud Council engine tests
         run: python -m unittest discover -s tests -p 'test_cloud_council_engine.py' -v
       - name: Run queue store adapter tests
         run: python -m unittest discover -s tests -p 'test_cloud_queue_store.py' -v
       - name: Run PostgreSQL queue integration tests
         run: python -m unittest discover -s tests -p 'test_cloud_postgres_queue_store.py' -v
+      - name: Run portable API validation tests
+        run: python -m unittest discover -s tests -p 'test_cloud_api.py' -v
+      - name: Run PostgreSQL API end-to-end contract tests
+        run: python -m unittest discover -s tests -p 'test_cloud_api_postgres_integration.py' -v
       - name: Set up QEMU for ARM64 image build
         uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
