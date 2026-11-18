@@ -96,3 +96,14 @@ GitHub Actions `Council API smoke test` run #8 passed against deployed Edge Func
 GitHub Actions smoke test run #9 passed. It verifies health, required protocol version, rejection of invalid machine credentials on status/result/cancel, and the fail-closed submit gate. Direct database checks confirm RLS enabled on all three API tables, no SELECT privileges for `anon` or `authenticated`, server-role-only access to the audit sequence and worker claim function, zero registered machine agents and zero request rows. No test task or provider call was executed.
 
 The Gateway must include the public Supabase `apikey` header as well as its own secret machine Bearer token. This is a cross-repository client change and is intentionally not applied to Engineering Core in this repository's work.
+
+
+## Council engine and worker implementation — 2026-11-18
+
+The app repository now contains a cloud adapter in `cloud_worker/engine.py` and a separate long-running container worker in `cloud_worker/worker.py`. The adapter injects server-side route config into the existing `llm_api.py` provider router; the Android app's local config path remains the default for existing callers.
+
+The worker claims durable jobs using the database lease function, renews leases while model calls are active, publishes a live heartbeat, observes cancellation between model operations, persists progress/results, and lets expired leases be retried. A worker registry table is used by the Edge API to verify a recent heartbeat; a static environment flag alone cannot mark the service ready.
+
+The engine currently performs independent participant positions, bounded critique rounds, and final structured positions. Outcome is derived from the final explicit verdicts. It does not claim external fact verification. Weighted voting is not implemented; if requested, weighted_enabled is false and the limitation is recorded.
+
+The container and CI tests are implemented. A long-running external host and provider credentials have not been provisioned. Consequently the two Edge Function activation flags remain disabled and submit remains closed. This is an intentional deployment safety gate, not a completed live service.
