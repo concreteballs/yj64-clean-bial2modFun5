@@ -50,7 +50,7 @@ jobs:
         with:
           packages: platform-tools
 
-      - name: Set up Gradle 8.9
+      - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
@@ -64,34 +64,20 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            autoconf \
-            automake \
-            cmake \
-            gettext \
-            libffi-dev \
-            libltdl-dev \
-            libncurses5-dev \
-            libncursesw5-dev \
-            libssl-dev \
-            libtinfo6 \
-            libtool \
-            pkg-config \
-            unzip \
-            zip \
-            zlib1g-dev
+            autoconf automake cmake gettext libffi-dev libltdl-dev \
+            libncurses5-dev libncursesw5-dev libssl-dev libtinfo6 \
+            libtool pkg-config unzip zip zlib1g-dev
 
       - name: Install pinned Python build tools
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          python -m pip install \
-            "buildozer==1.5.0" \
-            "Cython==0.29.36" \
-            "virtualenv==20.29.3"
+          python -m pip install "buildozer==1.5.0" "Cython==0.29.36" "virtualenv==20.29.3"
 
-      - name: Cache Buildozer, Android SDK and NDK
+      - name: Cache Buildozer and Android toolchains
         uses: actions/cache@v4
         with:
           path: |
+            .buildozer
             ~/.buildozer
             ~/.android
           key: ${{ runner.os }}-yj64-buildozer-1.5.0-cython-0.29.36-${{ hashFiles('buildozer.spec') }}
@@ -104,128 +90,28 @@ jobs:
       - name: Compile project Python modules
         run: |
           python -m py_compile \
-            main.py \
-            chat_workspace.py \
-            yj64_persistent_core.py \
-            llm_api.py \
-            llm_settings.py \
-            message_distributor.py \
-            services/internal_monitor.py \
-            p4a/hook.py \
-            tools/verify_guard.py
+            main.py chat_workspace.py yj64_persistent_core.py \
+            llm_api.py llm_settings.py message_distributor.py \
+            services/internal_monitor.py p4a/hook.py tools/verify_guard.py
 
       - name: Run diagnostic spool unit tests
         run: python -m unittest discover -s tests -v
 
-      - name: Create temporary emulator build specification
+      - name: Build Base APK for physical devices (ARM64)
+        run: |
+          buildozer android debug
+          test -s bin/blackmirror-0.1.32-arm64-v8a-debug.apk
+
+      - name: Create temporary x86_64 build specification
         run: |
           cp buildozer.spec buildozer-emulator.spec
-          sed -i 's/^android.archs = arm64-v8a$/android.archs = arm64-v8a,x86_64/' buildozer-emulator.spec
-          grep -q '^android.archs = arm64-v8a,x86_64
+          sed -i 's/^android.archs = arm64-v8a$/android.archs = x86_64/' buildozer-emulator.spec
+          grep -q '^android.archs = x86_64$' buildozer-emulator.spec
+          echo "Temporary emulator spec prepared; protected buildozer.spec remains unchanged."
 
-      - name: Install Monitor Android SDK components
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
-
-      - name: Build standalone Monitor debug APK
-        run: gradle --no-daemon -p monitor-app assembleDebug
-
-      - name: Verify standalone Monitor APK
-        run: |
-          test -s monitor-app/app/build/outputs/apk/debug/app-debug.apk
-          file monitor-app/app/build/outputs/apk/debug/app-debug.apk
-
-      - name: Boot virtual Android and test Base ↔ Monitor IPC
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 35
-          target: google_apis
-          arch: x86_64
-          profile: pixel_6
-          disable-animations: true
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
-          script: |
-            set -euo pipefail
-            BASE_APK="bin/blackmirror-0.1.32-x86_64-debug.apk"
-            MONITOR_APK="monitor-app/app/build/outputs/apk/debug/app-debug.apk"
-
-            adb wait-for-device
-            adb install -r "$MONITOR_APK"
-            adb install -r "$BASE_APK"
-
-            adb shell am force-stop org.blackmirror.yj64monitor
-            adb shell am force-stop org.blackmirror.blackmirror
-            adb shell monkey -p org.blackmirror.yj64monitor 1
-            sleep 3
-            adb shell monkey -p org.blackmirror.blackmirror 1
-
-            REPORT_PATH="files/yj64-reports/yj64-report.jsonl"
-            RECEIVED=0
-            for attempt in $(seq 1 60); do
-              if adb exec-out run-as org.blackmirror.yj64monitor cat "$REPORT_PATH" 2>/dev/null | grep -q '"event":"self_diagnostic"'; then
-                RECEIVED=1
-                break
-              fi
-              sleep 2
-            done
-
-            echo "=== Monitor report from private app storage ==="
-            adb exec-out run-as org.blackmirror.yj64monitor cat "$REPORT_PATH" || true
-            echo "=== Base and Monitor process state ==="
-            adb shell pidof org.blackmirror.blackmirror || true
-            adb shell pidof org.blackmirror.yj64monitor || true
-            echo "=== Relevant logcat ==="
-            adb logcat -d -t 5000 | grep -E "AndroidRuntime|Python|python|blackmirror|yj64|FATAL EXCEPTION" | tail -n 250 || true
-
-            if [ "$RECEIVED" -ne 1 ]; then
-              echo "Base diagnostic report did not reach Monitor through Content Provider IPC." >&2
-              exit 1
-            fi
-
-            REPORT="$(adb exec-out run-as org.blackmirror.yj64monitor cat "$REPORT_PATH")"
-            echo "$REPORT" | grep -q '"event":"internal_startup"'
-            echo "$REPORT" | grep -q '"event":"internal_service_ready"'
-            echo "PASS: Base reports were durably received by Monitor over Android Content Provider IPC."
-
-      - name: Verify APK output
-        run: |
-          mapfile -t apks < <(find bin -type f -name '*.apk' -print)
-          if [ "${#apks[@]}" -eq 0 ]; then
-            echo "No APK was produced in bin/." >&2
-            exit 1
-          fi
-          printf 'APK files found:\n'
-          printf '%s\n' "${apks[@]}"
-          echo "count=${#apks[@]}" >> "$GITHUB_OUTPUT"
-
-      - name: Upload debug APKs and emulator test logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: yj64-android-debug-${{ github.run_number }}
-          path: |
-            bin/*.apk
-            monitor-app/app/build/outputs/apk/debug/*.apk
-          if-no-files-found: warn
-          retention-days: 7
-
-      - name: Upload build logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: yj64-android-build-logs-${{ github.run_number }}
-          path: |
-            .buildozer/android/platform/build-*/build.log
-            .buildozer/android/platform/build-*/**/*.log
-          if-no-files-found: ignore
-          retention-days: 3
- buildozer-emulator.spec
-
-      - name: Build debug APKs (arm64 + x86_64)
+      - name: Build Base APK for Android emulator (x86_64)
         run: |
           buildozer -f buildozer-emulator.spec android debug
-          echo "Generated APKs:"
-          find bin -maxdepth 1 -type f -name '*.apk' -print
-          test -s bin/blackmirror-0.1.32-arm64-v8a-debug.apk
           test -s bin/blackmirror-0.1.32-x86_64-debug.apk
 
       - name: Install Monitor Android SDK components
@@ -235,9 +121,7 @@ jobs:
         run: gradle --no-daemon -p monitor-app assembleDebug
 
       - name: Verify standalone Monitor APK
-        run: |
-          test -s monitor-app/app/build/outputs/apk/debug/app-debug.apk
-          file monitor-app/app/build/outputs/apk/debug/app-debug.apk
+        run: test -s monitor-app/app/build/outputs/apk/debug/app-debug.apk
 
       - name: Boot virtual Android and test Base ↔ Monitor IPC
         uses: reactivecircus/android-emulator-runner@v2
@@ -256,7 +140,6 @@ jobs:
             adb wait-for-device
             adb install -r "$MONITOR_APK"
             adb install -r "$BASE_APK"
-
             adb shell am force-stop org.blackmirror.yj64monitor
             adb shell am force-stop org.blackmirror.blackmirror
             adb shell monkey -p org.blackmirror.yj64monitor 1
@@ -273,9 +156,9 @@ jobs:
               sleep 2
             done
 
-            echo "=== Monitor report from private app storage ==="
+            echo "=== Monitor report ==="
             adb exec-out run-as org.blackmirror.yj64monitor cat "$REPORT_PATH" || true
-            echo "=== Base and Monitor process state ==="
+            echo "=== Process state ==="
             adb shell pidof org.blackmirror.blackmirror || true
             adb shell pidof org.blackmirror.yj64monitor || true
             echo "=== Relevant logcat ==="
@@ -291,18 +174,14 @@ jobs:
             echo "$REPORT" | grep -q '"event":"internal_service_ready"'
             echo "PASS: Base reports were durably received by Monitor over Android Content Provider IPC."
 
-      - name: Verify APK output
+      - name: Verify APK outputs
         run: |
-          mapfile -t apks < <(find bin -type f -name '*.apk' -print)
-          if [ "${#apks[@]}" -eq 0 ]; then
-            echo "No APK was produced in bin/." >&2
-            exit 1
-          fi
-          printf 'APK files found:\n'
-          printf '%s\n' "${apks[@]}"
-          echo "count=${#apks[@]}" >> "$GITHUB_OUTPUT"
+          test -s bin/blackmirror-0.1.32-arm64-v8a-debug.apk
+          test -s bin/blackmirror-0.1.32-x86_64-debug.apk
+          test -s monitor-app/app/build/outputs/apk/debug/app-debug.apk
+          find bin monitor-app/app/build/outputs/apk/debug -type f -name '*.apk' -print
 
-      - name: Upload debug APKs and emulator test logs
+      - name: Upload debug APKs
         if: always()
         uses: actions/upload-artifact@v4
         with:
