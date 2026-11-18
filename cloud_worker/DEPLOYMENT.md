@@ -83,4 +83,4 @@ The same Docker image and environment contract should be reused. For a self-host
 
 ## What CI proves
 
-The Council Worker CI workflow compiles the router/worker, runs deterministic tests with mocked model responses and builds the Docker image. It does not provision a VM, install secrets, call paid model APIs or prove production uptime.
+The Council Worker CI workflow compiles the router/worker, runs deterministic Council tests, Supabase adapter tests and PostgreSQL integration tests against a disposable PostgreSQL 16 service, then builds the Docker image. A passing run validates the tested queue operations, not API migration, cloud provisioning, real provider credentials, billing or production uptime.
