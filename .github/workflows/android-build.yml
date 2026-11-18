@@ -141,43 +141,7 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
           script: |
-            bash -euo pipefail -c '
-              adb wait-for-device
-              adb install -r "monitor-app/app/build/outputs/apk/debug/app-debug.apk"
-              adb install -r "bin/blackmirror-0.1.32-x86_64-debug.apk"
-              adb shell am force-stop org.blackmirror.yj64monitor
-              adb shell am force-stop org.blackmirror.blackmirror
-              adb shell monkey -p org.blackmirror.yj64monitor 1
-              sleep 3
-              adb shell monkey -p org.blackmirror.blackmirror 1
-
-              RECEIVED=0
-              for attempt in $(seq 1 60); do
-                if adb exec-out run-as org.blackmirror.yj64monitor cat "files/yj64-reports/yj64-report.jsonl" 2>/dev/null | grep -q "\"event\":\"self_diagnostic\""; then
-                  RECEIVED=1
-                  break
-                fi
-                sleep 2
-              done
-
-              echo "=== Monitor report ==="
-              adb exec-out run-as org.blackmirror.yj64monitor cat "files/yj64-reports/yj64-report.jsonl" || true
-              echo "=== Process state ==="
-              adb shell pidof org.blackmirror.blackmirror || true
-              adb shell pidof org.blackmirror.yj64monitor || true
-              echo "=== Relevant logcat ==="
-              adb logcat -d -t 5000 | grep -E "AndroidRuntime|Python|python|blackmirror|yj64|FATAL EXCEPTION" | tail -n 250 || true
-
-              if [ "$RECEIVED" -ne 1 ]; then
-                echo "Base diagnostic report did not reach Monitor through Content Provider IPC." >&2
-                exit 1
-              fi
-
-              REPORT=$(adb exec-out run-as org.blackmirror.yj64monitor cat "files/yj64-reports/yj64-report.jsonl")
-              echo "$REPORT" | grep -q "\"event\":\"internal_startup\""
-              echo "$REPORT" | grep -q "\"event\":\"internal_service_ready\""
-              echo "PASS: Base reports were durably received by Monitor over Android Content Provider IPC."
-            '
+            bash -c "$(printf '%s' 'c2V0IC1ldW8gcGlwZWZhaWwKYWRiIHdhaXQtZm9yLWRldmljZQphZGIgaW5zdGFsbCAtciAibW9uaXRvci1hcHAvYXBwL2J1aWxkL291dHB1dHMvYXBrL2RlYnVnL2FwcC1kZWJ1Zy5hcGsiCmFkYiBpbnN0YWxsIC1yICJiaW4vYmxhY2ttaXJyb3ItMC4xLjMyLXg4Nl82NC1kZWJ1Zy5hcGsiCmFkYiBzaGVsbCBhbSBmb3JjZS1zdG9wIG9yZy5ibGFja21pcnJvci55ajY0bW9uaXRvcgphZGIgc2hlbGwgYW0gZm9yY2Utc3RvcCBvcmcuYmxhY2ttaXJyb3IuYmxhY2ttaXJyb3IKYWRiIHNoZWxsIG1vbmtleSAtcCBvcmcuYmxhY2ttaXJyb3IueWo2NG1vbml0b3IgMQpzbGVlcCAzCmFkYiBzaGVsbCBtb25rZXkgLXAgb3JnLmJsYWNrbWlycm9yLmJsYWNrbWlycm9yIDEKUkVDRUlWRUQ9MApmb3IgYXR0ZW1wdCBpbiAkKHNlcSAxIDYwKTsgZG8KICBpZiBhZGIgZXhlYy1vdXQgcnVuLWFzIG9yZy5ibGFja21pcnJvci55ajY0bW9uaXRvciBjYXQgImZpbGVzL3lqNjQtcmVwb3J0cy95ajY0LXJlcG9ydC5qc29ubCIgMj4vZGV2L251bGwgfCBncmVwIC1xICciZXZlbnQiOiJzZWxmX2RpYWdub3N0aWMiJzsgdGhlbgogICAgUkVDRUlWRUQ9MQogICAgYnJlYWsKICBmaQogIHNsZWVwIDIKZG9uZQplY2hvICI9PT0gTW9uaXRvciByZXBvcnQgPT09IgphZGIgZXhlYy1vdXQgcnVuLWFzIG9yZy5ibGFja21pcnJvci55ajY0bW9uaXRvciBjYXQgImZpbGVzL3lqNjQtcmVwb3J0cy95ajY0LXJlcG9ydC5qc29ubCIgfHwgdHJ1ZQplY2hvICI9PT0gUHJvY2VzcyBzdGF0ZSA9PT0iCmFkYiBzaGVsbCBwaWRvZiBvcmcuYmxhY2ttaXJyb3IuYmxhY2ttaXJyb3IgfHwgdHJ1ZQphZGIgc2hlbGwgcGlkb2Ygb3JnLmJsYWNrbWlycm9yLnlqNjRtb25pdG9yIHx8IHRydWUKZWNobyAiPT09IFJlbGV2YW50IGxvZ2NhdCA9PT0iCmFkYiBsb2djYXQgLWQgLXQgNTAwMCB8IGdyZXAgLUUgIkFuZHJvaWRSdW50aW1lfFB5dGhvbnxweXRob258YmxhY2ttaXJyb3J8eWo2NHxGQVRBTCBFWENFUFRJT04iIHwgdGFpbCAtbiAyNTAgfHwgdHJ1ZQppZiBbICIkUkVDRUlWRUQiIC1uZSAxIF07IHRoZW4KICBlY2hvICJCYXNlIGRpYWdub3N0aWMgcmVwb3J0IGRpZCBub3QgcmVhY2ggTW9uaXRvciB0aHJvdWdoIENvbnRlbnQgUHJvdmlkZXIgSVBDLiIgPiYyCiAgZXhpdCAxCmZpClJFUE9SVD0kKGFkYiBleGVjLW91dCBydW4tYXMgb3JnLmJsYWNrbWlycm9yLnlqNjRtb25pdG9yIGNhdCAiZmlsZXMveWo2NC1yZXBvcnRzL3lqNjQtcmVwb3J0Lmpzb25sIikKZWNobyAiJFJFUE9SVCIgfCBncmVwIC1xICciZXZlbnQiOiJpbnRlcm5hbF9zdGFydHVwIicKZWNobyAiJFJFUE9SVCIgfCBncmVwIC1xICciZXZlbnQiOiJpbnRlcm5hbF9zZXJ2aWNlX3JlYWR5IicKZWNobyAiUEFTUzogQmFzZSByZXBvcnRzIHdlcmUgZHVyYWJseSByZWNlaXZlZCBieSBNb25pdG9yIG92ZXIgQW5kcm9pZCBDb250ZW50IFByb3ZpZGVyIElQQy4i' | base64 -d)"
 
       - name: Verify APK outputs
         run: |
