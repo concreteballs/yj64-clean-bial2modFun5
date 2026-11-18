@@ -117,7 +117,7 @@ def validate_request(value: Any) -> str | None:
         number = limits.get(key)
         if isinstance(number, bool) or not isinstance(number, int) or not low <= number <= high:
             return error
-    if limits.get("minimum_critique_rounds") != 1 or not isinstance(limits.get("allow_early_stop"), bool):
+    if isinstance(limits.get("minimum_critique_rounds"), bool) or limits.get("minimum_critique_rounds") != 1 or not isinstance(limits.get("allow_early_stop"), bool):
         return "invalid_critique_limits"
     voting = value.get("voting")
     if not isinstance(voting, dict) or set(voting) - {"enabled", "weighted"}:
@@ -199,6 +199,14 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="YJ-64 Council API", version=VERSION, docs_url=None, redoc_url=None, lifespan=lifespan)
+
+
+@app.middleware("http")
+async def disable_response_caching(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["cache-control"] = "no-store"
+    response.headers["x-content-type-options"] = "nosniff"
+    return response
 
 
 @app.get("/health")
@@ -356,7 +364,8 @@ def get_result(request_id: str, request: Request):
         result = row["result"]
         required = ("claims", "participant_positions", "dissent", "evidence", "unresolved_questions")
         valid = (
-            result.get("protocol_version") == VERSION
+            isinstance(result, dict)
+            and result.get("protocol_version") == VERSION
             and str(result.get("request_id")) == str(row["request_id"])
             and str(result.get("session_id")) == str(row["session_id"])
             and result.get("status") == "completed"
