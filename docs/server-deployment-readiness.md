@@ -1,108 +1,80 @@
 # YJ-64 server deployment readiness
 
-Status: server worker exists and is CI-tested; hosting deployment and provider-backed E2E are not yet complete.
-Scope: this repository only.
+Status: portable API, PostgreSQL queue adapter and worker containers are implemented. Automated CI and live authenticated provider verification remain outstanding.
+Scope: `concreteballs/yj64-clean-bial2modFun5` only.
 
-## Architecture found in the repository
+## Server architecture now present
 
-This repository already contains a server-side Council runtime:
+- `cloud_worker/engine.py`: server-side Council engine using the shared `llm_api.py` provider router.
+- `cloud_worker/worker.py`: persistent worker with bounded concurrency, heartbeat, lease renewal, cancellation, progress and terminal persistence.
+- `cloud_worker/queue_store.py`: `SupabaseQueueStore` compatibility adapter and standard `PostgresQueueStore`.
+- `cloud_worker/api.py`: FastAPI ingress implementing the existing `yj64.council-api.v1` contract (submit, idempotency, status, result and cancellation).
+- `cloud_worker/postgres/schema.sql`: standalone PostgreSQL schema for agents, requests, events and worker registry.
+- `cloud_worker/compose.yaml`: API and worker run from the same OCI image and share one `DATABASE_URL`.
+- `.github/workflows/council-worker-tests.yml`: deterministic tests, disposable PostgreSQL 16 integration tests and multi-architecture OCI build.
 
-- `cloud_worker/engine.py`: server-native Council engine. It reuses the shared `llm_api.py` provider router and injects provider credentials at runtime.
-- `cloud_worker/worker.py`: persistent queue consumer with bounded concurrency, worker heartbeats, leases, cancellation checks, progress events and terminal result persistence.
-- `cloud_worker/Dockerfile`: Python 3.11 slim container.
-- `supabase/functions/council-api`: HTTP ingress/control plane.
-- `supabase/migrations`: PostgreSQL request queue, claim RPC and worker registry.
-- `.github/workflows/council-worker-tests.yml`: compile, deterministic tests and Docker image build.
+The Android Base and Monitor APKs are not server deployment artifacts.
 
-The Android Base and Monitor APKs are not server deployment artifacts. The Android IPC test remains a legacy client/diagnostic regression test only.
+## Migration and compatibility
 
-## Current coupling that must be isolated before moving off Supabase
+The previous Supabase Edge Function and Supabase queue adapter remain available as a separate fallback. Do not mix deployment modes: a Supabase Edge Function must use the Supabase worker adapter; the standalone FastAPI ingress must use the PostgreSQL worker adapter. API and worker always share the same database.
 
-The worker now uses the `QueueStore` protocol (`cloud_worker/queue_store.py`) with two implementations: `SupabaseQueueStore` for the current deployment and `PostgresQueueStore` for a standalone PostgreSQL database (`cloud_worker/postgres/schema.sql`). The Supabase adapter still uses:
+The Council engine and provider router remain independent of the hosting vendor. The standalone API uses standard PostgreSQL and does not require Supabase SDKs, Edge Functions, RLS or PostgREST.
 
-- `supabase.create_client()`
-- PostgREST table operations
-- RPC `yj64_claim_council_api_request`
-- Supabase worker registry tables
+## Hosting choice (reviewed 2026-11-19)
 
-The Council engine itself is comparatively portable. The queue/storage adapter and current Edge Function ingress are the provider-specific boundaries. A future self-hosted or non-Supabase deployment must complete PostgreSQL adapter validation and move/replace the ingress adapter so it writes to the same database, not rewrite the Council engine or public protocol.
+### Primary: Oracle Cloud Always Free VM
 
-## Free hosting assessment (checked 2026-11-19)
-
-### Primary candidate: Oracle Cloud Always Free VM
-
-Official Always Free documentation currently lists:
-- Ampere A1 allowance of 1,500 OCPU-hours and 9,000 GB-hours monthly, equivalent for Always Free accounts to 2 OCPUs and 12 GB RAM.
-- 200 GB total Always Free block-volume storage.
-- 10 TB monthly outbound transfer.
-- Resources must be created in the tenancy home region.
-- Capacity may be unavailable at provisioning time.
-- Idle Always Free compute can be reclaimed when CPU, network and (for A1) memory utilization remain below Oracle's thresholds for seven days.
-
-This is the best fit for a continuously running Docker worker if the user's account can provision the VM. A1 is ARM64, so build and test multi-architecture images (linux/arm64 and linux/amd64) and avoid x86-only native dependencies.
+Oracle's official Always Free documentation lists the Ampere A1 allowance equivalent to 2 OCPUs and 12 GB RAM for qualifying tenancies, plus 200 GB block storage. A1 is ARM64, so the server image must support `linux/arm64`. Regional capacity is not guaranteed and Oracle may reclaim idle Always Free compute. Confirm current eligibility and limits during provisioning.
 
 Official docs:
 - https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm
 - https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier.htm
 
-### Secondary candidate: Google Cloud Compute Engine Free Tier
+### Secondary: Google Cloud e2-micro Free Tier
 
-Official documentation lists one non-preemptible e2-micro per month in the supported US regions (Oregon, Iowa, South Carolina), 30 GB-month standard persistent disk and 1 GB/month outbound transfer from North America. A billing account is required and usage beyond Free Tier limits is billable. This is a small fallback/test host, not the preferred YJ64 worker host; the supported regions and very low egress allowance are important constraints.
+One non-preemptible e2-micro is free only in selected US regions, with 30 GB-month standard persistent disk and a very small 1 GB/month outbound transfer allowance. A billing account is required; overages can be charged. Suitable only as a small fallback/test host.
 
 Official docs:
 - https://docs.cloud.google.com/free/docs/free-cloud-features
 
-### Not a permanent free worker host
+### Not suitable for a permanent free worker
 
-- Render Free Web Services sleep after 15 minutes of inactivity, have no persistent disk and do not offer free Background Worker instances. Render Background Workers are appropriate only on a paid plan.
-- Koyeb/Railway and similar free app tiers have compute, storage, credit or sleep limits; treat them as demos/temporary environments, not guaranteed always-on infrastructure.
-- Supabase Free is currently the control-plane/database dependency, not a place to run the persistent Python worker. Keep the worker external.
-- Neon/Supabase free Postgres may be useful for development, but do not make a sleeping/limited free database the only durable copy. Keep regular PostgreSQL dumps and test restores.
+Render Free Web Services sleep after inactivity, use ephemeral filesystems and do not include free Background Worker instances. Other free app/database tiers may impose sleep, compute, storage or credit limits. They are not a substitute for a durable always-on queue host.
 
-Official Render docs:
+Official docs:
 - https://render.com/docs/free
 - https://render.com/docs/background-workers
 
-## Portability rules (required for all new server work)
+## Portability requirements
 
-1. Keep Council orchestration and provider routing independent from hosting vendor APIs.
-2. Use standard Linux containers, Python 3.11+, HTTP/JSON, environment configuration and PostgreSQL semantics.
-3. Keep queue/database operations behind the `QueueStore` contract. Both Supabase and standard PostgreSQL adapters now exist; validate them against the same contract before claiming database portability.
-4. Keep migrations as ordinary SQL wherever possible. Isolate vendor-specific auth and Edge Function behavior behind the ingress adapter.
-5. Persist authoritative task state in PostgreSQL, not container filesystems or ephemeral key-value stores.
-6. Treat local files as disposable cache only. Store durable artifacts in PostgreSQL or an S3-compatible object-storage adapter.
-7. Keep secrets outside Git, images, APKs and logs. Support environment variables or mounted secret files.
-8. Build multi-architecture OCI images (linux/amd64 and linux/arm64); pin base images/dependencies and run the same tests on both architectures.
-9. Provide graceful SIGTERM handling, bounded shutdown, restart policy, lease recovery, idempotency and health/readiness checks.
-10. Make provider migration a configuration change wherever possible: the same image must run on free VM, paid VPS, dedicated Linux host or user's own hardware.
+1. Council orchestration stays independent from hosting vendor APIs.
+2. Use standard OCI containers, Python 3.11+, HTTP/JSON and PostgreSQL.
+3. Keep database access behind the `QueueStore` protocol.
+4. Store authoritative task state in PostgreSQL, never the container filesystem.
+5. Inject provider and database secrets at runtime; never commit secrets or bake them into images.
+6. Build and test `linux/amd64` and `linux/arm64`.
+7. Preserve idempotency, cancellation, bounded execution, lease recovery and graceful shutdown.
+8. Reuse the same image on free VM, paid VPS, dedicated host or user-owned Linux hardware.
 
-## Deployment shape
+## Current remaining blockers
 
-- `api`: HTTP ingress/control plane. Initially the existing Supabase Edge Function; later replaceable by a containerized FastAPI service implementing the same public contract.
-- `worker`: current Python Council worker container.
-- `database`: PostgreSQL. Initially Supabase-hosted PostgreSQL; later any compatible managed or self-hosted PostgreSQL.
-- `object storage`: optional S3-compatible adapter for large artifacts; not required for the current queue payloads.
-- `reverse proxy/TLS`: provider-neutral Caddy or equivalent when the API is self-hosted.
+- GitHub Actions must complete successfully for the latest API/worker changes. The connector currently does not expose the push workflow run status reliably, so do not mark CI as passed until the run is visible in GitHub Actions.
+- No external host or standalone PostgreSQL instance has been provisioned.
+- Real provider credentials are not installed and no authenticated live provider execution has been performed.
+- The agent-token provisioning and HTTPS reverse proxy must be configured on the target host.
+- PostgreSQL backup/restore must be tested before relying on the deployment.
 
-The initial Oracle VM deployment can run the worker container while the existing Supabase API/database remain in place. This avoids a risky simultaneous migration. The PostgreSQL worker adapter and standalone schema now exist. The next portability milestone is a self-hosted API container implementing the existing public contract and sharing the same PostgreSQL database with the worker.
+## Safe activation order
 
-## Current deployment blockers
+1. Keep `YJ64_COUNCIL_ENGINE_ADAPTER=not_ready` and `YJ64_COUNCIL_WORKER_ENABLED=false`.
+2. Verify GitHub Actions tests and multi-architecture image build.
+3. Provision the free Linux VM and PostgreSQL database.
+4. Apply `cloud_worker/postgres/schema.sql`, create runtime credentials and configure the HTTPS reverse proxy.
+5. Install provider secrets and agent token hashes securely.
+6. Verify worker heartbeat and API health.
+7. Run authenticated submit → execution → status → result, idempotency, cancellation and lease-recovery tests.
+8. Only after all checks pass, explicitly open the submit gate.
+9. Test PostgreSQL backup and restore before moving to a paid or self-hosted server.
 
-- No external worker host has been provisioned.
-- Real provider routes and secrets are not yet installed in a host secret manager.
-- No authenticated live provider E2E has been run.
-- The PostgreSQL adapter and standalone schema are implemented, but the current Edge Function still targets Supabase. A complete self-hosted deployment also requires moving/replacing API ingress and validating the end-to-end flow against one shared database.
-- CI now includes a disposable PostgreSQL service and tests for concurrent claims, expired-lease recovery, cancellation and result persistence. The latest workflow result still needs confirmation; even a passing run does not prove cloud deployment, provider credentials, billing or uptime.
-
-## Safe activation sequence
-
-1. Preserve the existing submit gate as closed.
-2. Build and test multi-architecture container artifacts.
-3. Provision an eligible free VM and configure firewall/SSH/updates.
-4. Install worker secrets in the VM's protected environment file or secret manager.
-5. Start one worker container with restart policy; confirm heartbeat and logs.
-6. Run controlled authenticated provider E2E, cancellation, lease recovery and terminal persistence tests.
-7. Only then enable the API submit gate.
-8. Before changing host or database provider, export PostgreSQL data and verify restore in the target environment.
-
-Never commit API keys, database passwords, service-role keys, deployment tokens or real provider credentials.
+Never place API keys, database passwords, bearer tokens, service-role keys or deployment credentials in Git, APKs, logs or chat.
