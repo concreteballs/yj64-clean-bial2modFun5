@@ -26,11 +26,15 @@ services:
     image: yj64-council:latest
     init: true
     restart: unless-stopped
-    env_file:
-      - .env
     environment:
       YJ64_QUEUE_BACKEND: postgres
       DATABASE_URL: postgresql://${YJ64_POSTGRES_USER:-yj64_runtime}:${YJ64_POSTGRES_PASSWORD:?Set YJ64_POSTGRES_PASSWORD in .env}@postgres:5432/${YJ64_POSTGRES_DB:-yj64}
+      YJ64_DB_POOL_SIZE: ${YJ64_DB_POOL_SIZE:-12}
+      YJ64_COUNCIL_PROVIDER_CONFIG: ${YJ64_COUNCIL_PROVIDER_CONFIG:?Set at least two provider routes in .env}
+      YJ64_WORKER_POLL_SECONDS: ${YJ64_WORKER_POLL_SECONDS:-3}
+      YJ64_WORKER_LEASE_SECONDS: ${YJ64_WORKER_LEASE_SECONDS:-180}
+      YJ64_WORKER_CONCURRENCY: ${YJ64_WORKER_CONCURRENCY:-2}
+      YJ64_WORKER_ID: ${YJ64_WORKER_ID:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -53,11 +57,11 @@ services:
       - --forwarded-allow-ips=127.0.0.1
     init: true
     restart: unless-stopped
-    env_file:
-      - .env
     environment:
-      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      DATABASE_URL: postgresql://${YJ64_POSTGRES_USER:-yj64_runtime}:${YJ64_POSTGRES_PASSWORD:?Set YJ64_POSTGRES_PASSWORD in .env}@postgres:5432/${YJ64_POSTGRES_DB:-yj64}
       YJ64_API_DB_POOL_SIZE: ${YJ64_API_DB_POOL_SIZE:-8}
+      YJ64_COUNCIL_ENGINE_ADAPTER: ${YJ64_COUNCIL_ENGINE_ADAPTER:-not_ready}
+      YJ64_COUNCIL_WORKER_ENABLED: ${YJ64_COUNCIL_WORKER_ENABLED:-false}
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:
