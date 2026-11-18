@@ -808,3 +808,55 @@ Android Emulator — тестовая среда для APK, а не публи�
 #### Следующий разрешённый пакет работ
 
 Продолжить с **Пакета 1**: сверить Gateway schema и тестовые fixtures; зафиксировать runtime для Council API и отдельного worker, persistent storage/queue и deployment topology; определить серверный интерфейс доступа к штатному Council; подготовить ADR и OpenAPI. Только после этого начинать пакет 2. Не создавать mock endpoint, который возвращает фиктивный completed/consensus, и не считать зелёный Android emulator run доказательством API readiness.
+
+
+---
+
+## 8.3.12. Пакет 1 — ADR и OpenAPI-контракт Council API — 2026-11-18
+
+**Изменён только репозиторий приложения** `concreteballs/yj64-clean-bial2modFun5`, ветка `main`. Репозиторий `concreteballs/YJ64-Engineering-Core` использован только для чтения и сверки контракта.
+
+### Что добавлено
+
+1. `docs/ADR-001-COUNCIL-API-CLOUD-RUNTIME.md`
+   - Зафиксирована предлагаемая cloud-first схема: отдельный stateless HTTPS API, PostgreSQL durable state, отдельный worker/очередь, private artifacts и серверный адаптер к реальному Council.
+   - Vercel обозначен как первый кандидат для API runtime, но не объявлен утверждённым production target: обязательна проверка реального URL, лимитов функций, Python runtime, secrets, health/logging.
+   - Повторное использование Supabase `YJ64-Autonomous-Core` разрешено только после проверки владельца/доступа, изоляции схем, RLS, credentials, очереди и ответственности за backup/retention. Без этой проверки нельзя подключать приложение к чужим таблицам или service-role ключам.
+   - Отвергнуты Android Emulator как сервер, синхронное выполнение всего Council в HTTP request, хранение состояния в памяти serverless-функции и фиктивные mock-результаты.
+
+2. `docs/openapi/council-api-v1.yaml`
+   - Добавлена спецификация OpenAPI 3.1 для четырёх маршрутов Gateway:
+     - `POST /api/v1/external-agents/council/requests`
+     - `GET /api/v1/external-agents/council/requests/{request_id}`
+     - `GET /api/v1/external-agents/council/requests/{request_id}/result`
+     - `POST /api/v1/external-agents/council/requests/{request_id}/cancel`
+   - Зафиксированы Bearer machine auth, `X-YJ64-Protocol-Version`, Idempotency-Key, входная схема, статусы, исходы и структурированный результат.
+   - Submit возвращает `202` только после durable persistence; status/result/cancel должны быть owner-scoped.
+   - Содержательный outcome отделён от execution status; индивидуальные бюллетени и приватные рейтинги не публикуются.
+
+### Контрактная сверка
+
+OpenAPI сверена с read-only источниками Gateway:
+- `schemas/council-api-v1.schema.json`;
+- `docs/COUNCIL_GATEWAY_INTEGRATION_RU.md`;
+- `src/yj64_engineering_core/automation/council_gateway.py`;
+- `src/yj64_engineering_core/automation/council_result_consumer.py`.
+
+Совпадают protocol version, четыре пути, поля запроса, enum статусов/outcomes и структура результата. В OpenAPI добавлены транспортные заголовки и HTTP response semantics. Отдельная автоматическая проверка эквивалентности OpenAPI и Gateway JSON Schema пока не создана; она остаётся критерием пакета 1.
+
+### Обновлённый статус пакета 1
+
+**Частично выполнен; документы созданы, инфраструктурное решение пока Proposed.** Нельзя отмечать пакет 1 как полностью закрытый до следующих проверок:
+
+- [ ] Проверить доступность и пригодность Vercel runtime для API и worker; зафиксировать проверенный staging/production origin.
+- [ ] Проверить Supabase ownership/access, регион, RLS, private Storage, queue capability и возможность отдельной app-owned schema/credentials.
+- [ ] Найти реальный server-callable интерфейс Council/router/session в коде приложения; определить, что можно безопасно вынести из Kivy UI в platform-neutral service layer.
+- [ ] Автоматически сверять OpenAPI с Gateway JSON Schema/fixtures и добавить contract tests.
+- [ ] Уточнить durable queue lease, retries, worker scheduling, cancellation race, checkpoint/recovery и retention.
+- [ ] После подтверждения этих пунктов перевести ADR из Proposed в Accepted отдельным коммитом.
+
+### Следующий пакет реализации
+
+После закрытия перечисленных проверок начать пакет 2: серверный API intake, machine identity/scopes, owner-scoped request/session persistence, idempotency, durable queue и worker skeleton. Не реализовывать endpoint, который имитирует Council. Реальное выполнение Consensus/Critique будет подключено через server-side adapter и проверено отдельно.
+
+**Проверка Android:** успешный emulator run #29 остаётся подтверждением сборки/установки/запуска APK и диагностического IPC Base → Monitor. Он не является проверкой Council API и не меняет статусы пакетов 2–5.
