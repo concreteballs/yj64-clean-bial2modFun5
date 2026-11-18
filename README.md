@@ -48,3 +48,15 @@ Stage 2 build trigger: embedded-agent base integration.
 ## Server deployment
 
 This repository currently builds an Android client and Android diagnostic Monitor. These APKs are not the server deployment target. The Linux server migration assessment, Android-specific dependencies, proposed server split, free-hosting assessment, and migration sequence are documented in [docs/server-deployment-readiness.md](docs/server-deployment-readiness.md).
+
+## Portable Council server
+
+The repository also contains a standalone Linux server stack:
+
+- `cloud_worker/api.py`: FastAPI ingress implementing the existing `yj64.council-api.v1` HTTP contract.
+- `cloud_worker/worker.py`: persistent Council worker.
+- `cloud_worker/queue_store.py`: Supabase and standard PostgreSQL queue adapters.
+- `cloud_worker/postgres/schema.sql`: standalone PostgreSQL schema.
+- `cloud_worker/compose.yaml`: API and worker containers sharing one PostgreSQL database.
+
+Start with [the server deployment guide](cloud_worker/DEPLOYMENT.md). The public intake gate is disabled in the example configuration and must remain closed until authenticated live provider tests pass. Do not expose the API container directly; place HTTPS reverse proxying and rate limiting in front of its loopback-bound port.
