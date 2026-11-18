@@ -89,3 +89,10 @@ The current `llm_api.py` reads provider configuration from the local app `user_d
 ## Smoke-test evidence
 
 GitHub Actions `Council API smoke test` run #8 passed against deployed Edge Function v5. It verified API/database health, mandatory protocol header, rejection of invalid machine credentials, and the submit readiness gate returning `503 council_engine_not_ready`. This confirms the transport/security gate only; it does not prove real Council execution or Gateway end-to-end integration.
+
+
+## Extended route and database verification
+
+GitHub Actions smoke test run #9 passed. It verifies health, required protocol version, rejection of invalid machine credentials on status/result/cancel, and the fail-closed submit gate. Direct database checks confirm RLS enabled on all three API tables, no SELECT privileges for `anon` or `authenticated`, server-role-only access to the audit sequence and worker claim function, zero registered machine agents and zero request rows. No test task or provider call was executed.
+
+The Gateway must include the public Supabase `apikey` header as well as its own secret machine Bearer token. This is a cross-repository client change and is intentionally not applied to Engineering Core in this repository's work.
