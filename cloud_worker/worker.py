@@ -1,7 +1,6 @@
 """Durable Council queue worker. Run as a separate long-lived container."""
 from __future__ import annotations
 
-import json
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import os
 import signal
@@ -10,84 +9,64 @@ import threading
 import time
 import traceback
 import uuid
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from supabase import create_client
+
 from cloud_worker.engine import CouncilCancelled, CouncilEngine, load_provider_routes
+from cloud_worker.queue_store import QueueStore, SupabaseQueueStore
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 POLL_SECONDS = max(1, int(os.environ.get("YJ64_WORKER_POLL_SECONDS", "3")))
-# Parallel slots per Render instance; horizontal replicas multiply total capacity.
 WORKER_CONCURRENCY = max(1, min(8, int(os.environ.get("YJ64_WORKER_CONCURRENCY", "2"))))
 LEASE_SECONDS = max(60, min(900, int(os.environ.get("YJ64_WORKER_LEASE_SECONDS", "180"))))
 WORKER_ID = os.environ.get("YJ64_WORKER_ID") or f"{socket.gethostname()}-{uuid.uuid4().hex[:12]}"
 
-db = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 stop_event = threading.Event()
 
 
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def build_queue_store() -> QueueStore:
+    """Select the compatibility adapter until another adapter is explicitly configured."""
+    backend = os.environ.get("YJ64_QUEUE_BACKEND", "supabase").strip().lower()
+    if backend != "supabase":
+        raise RuntimeError(
+            f"Unsupported YJ64_QUEUE_BACKEND={backend!r}; only the verified "
+            "Supabase adapter is currently available"
+        )
+    client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    return SupabaseQueueStore(client)
 
 
-def load_request(request_id: str) -> dict[str, Any]:
-    response = db.table("yj64_council_api_requests").select("*").eq("request_id", request_id).single().execute()
-    return response.data
-
-
-def is_cancelled(request_id: str) -> bool:
-    row = db.table("yj64_council_api_requests").select("cancel_requested,status").eq("request_id", request_id).single().execute().data
-    return bool(row.get("cancel_requested")) or row.get("status") == "cancelled"
-
-
-def update_progress(request_id: str, progress: dict[str, Any]) -> None:
-    db.table("yj64_council_api_requests").update({
-        "progress": progress, "updated_at": utc_now()
-    }).eq("request_id", request_id).eq("worker_id", WORKER_ID).eq("status", "running").execute()
-
-
-def renew_lease(request_id: str) -> None:
-    expires = (datetime.now(timezone.utc) + timedelta(seconds=LEASE_SECONDS)).isoformat()
-    db.table("yj64_council_api_requests").update({
-        "lease_expires_at": expires, "updated_at": utc_now()
-    }).eq("request_id", request_id).eq("worker_id", WORKER_ID).eq("status", "running").execute()
-
-
-def heartbeat(request_id: str, finished: threading.Event) -> None:
+def heartbeat(
+    store: QueueStore, request_id: str, finished: threading.Event
+) -> None:
     while not finished.wait(max(15, LEASE_SECONDS // 3)):
         try:
-            if is_cancelled(request_id):
+            if store.is_cancelled(request_id):
                 return
-            renew_lease(request_id)
+            store.renew_lease(request_id, WORKER_ID, LEASE_SECONDS)
         except Exception:
             # Lease expiry enables another worker to recover the task.
             continue
 
 
-def finish_failed(request_id: str, code: str, message: str) -> None:
-    db.table("yj64_council_api_requests").update({
-        "status": "failed",
-        "error_code": code[:100],
-        "error_message": message[:2000],
-        "completed_at": utc_now(),
-        "updated_at": utc_now(),
-        "lease_expires_at": None,
-    }).eq("request_id", request_id).eq("worker_id", WORKER_ID).eq("status", "running").execute()
-
-
-def process(row: dict[str, Any], routes: dict[str, dict[str, str]]) -> None:
+def process(
+    store: QueueStore, row: dict[str, Any], routes: dict[str, dict[str, str]]
+) -> None:
     request_id = row["request_id"]
     session_id = row["session_id"]
     finished = threading.Event()
-    heartbeat_thread = threading.Thread(target=heartbeat, args=(request_id, finished), daemon=True)
+    heartbeat_thread = threading.Thread(
+        target=heartbeat, args=(store, request_id, finished), daemon=True
+    )
     heartbeat_thread.start()
     try:
         def report(event: dict[str, Any]) -> None:
-            update_progress(request_id, event)
-            if is_cancelled(request_id):
+            store.update_progress(request_id, WORKER_ID, event)
+            if store.is_cancelled(request_id):
                 raise CouncilCancelled("Cancellation requested")
+
         # One engine instance per request prevents progress callbacks/history from crossing chats.
         engine = CouncilEngine(routes=routes, report=report)
         request = {
@@ -96,41 +75,28 @@ def process(row: dict[str, Any], routes: dict[str, dict[str, str]]) -> None:
             "limits": row["limits"],
             "voting": row["voting"],
         }
-        result = engine.run(request, request_id, session_id, lambda: is_cancelled(request_id))
-        if is_cancelled(request_id):
-            db.table("yj64_council_api_requests").update({
-                "status": "cancelled", "completed_at": utc_now(),
-                "updated_at": utc_now(), "lease_expires_at": None,
-            }).eq("request_id", request_id).eq("worker_id", WORKER_ID).eq("status", "running").execute()
+        result = engine.run(
+            request, request_id, session_id, lambda: store.is_cancelled(request_id)
+        )
+        if store.is_cancelled(request_id):
+            store.mark_cancelled(request_id, WORKER_ID)
             return
-        db.table("yj64_council_api_requests").update({
-            "status": "completed", "result": result, "progress": {"phase": "completed"},
-            "completed_at": utc_now(), "updated_at": utc_now(), "lease_expires_at": None,
-            "error_code": None, "error_message": None,
-        }).eq("request_id", request_id).eq("worker_id", WORKER_ID).eq("status", "running").execute()
-        db.table("yj64_council_api_events").insert({
-            "request_id": request_id, "agent_id": row["agent_id"],
-            "event_type": "council_completed", "details": {"outcome": result["outcome"]},
-        }).execute()
+
+        store.mark_completed(request_id, WORKER_ID, result)
+        store.record_event(
+            request_id, row["agent_id"], "council_completed",
+            {"outcome": result["outcome"]},
+        )
     except CouncilCancelled:
-        db.table("yj64_council_api_requests").update({
-            "status": "cancelled", "completed_at": utc_now(),
-            "updated_at": utc_now(), "lease_expires_at": None,
-        }).eq("request_id", request_id).eq("worker_id", WORKER_ID).eq("status", "running").execute()
+        store.mark_cancelled(request_id, WORKER_ID)
     except Exception as exc:
-        # Retry is handled by lease expiry and max_attempts in the DB claim function.
+        # Retry is handled by lease expiry and max_attempts in the database claim function.
         try:
-            db.table("yj64_council_api_events").insert({
-                "request_id": request_id, "agent_id": row["agent_id"],
-                "event_type": "worker_attempt_failed",
-                "details": {"error_type": type(exc).__name__, "message": str(exc)[:1000]},
-            }).execute()
-            db.table("yj64_council_api_requests").update({
-                "error_code": "worker_attempt_failed",
-                "error_message": str(exc)[:2000],
-                "lease_expires_at": utc_now(),
-                "updated_at": utc_now(),
-            }).eq("request_id", request_id).eq("worker_id", WORKER_ID).eq("status", "running").execute()
+            store.record_event(
+                request_id, row["agent_id"], "worker_attempt_failed",
+                {"error_type": type(exc).__name__, "message": str(exc)[:1000]},
+            )
+            store.record_attempt_failure(request_id, WORKER_ID, str(exc))
         except Exception:
             traceback.print_exc()
     finally:
@@ -138,57 +104,29 @@ def process(row: dict[str, Any], routes: dict[str, dict[str, str]]) -> None:
         heartbeat_thread.join(timeout=2)
 
 
-def fail_exhausted_leases() -> None:
-    now = utc_now()
-    expired = db.table("yj64_council_api_requests").select(
-        "request_id,attempts,max_attempts"
-    ).eq("status", "running").lt("lease_expires_at", now).execute().data or []
-    for row in expired:
-        if int(row["attempts"]) >= int(row["max_attempts"]):
-            db.table("yj64_council_api_requests").update({
-                "status": "failed", "error_code": "worker_retries_exhausted",
-                "error_message": "Worker lease expired after the maximum number of attempts.",
-                "completed_at": now, "updated_at": now, "lease_expires_at": None,
-            }).eq("request_id", row["request_id"]).eq("status", "running").execute()
-
-
-def publish_heartbeat(status: str, routes: list[str]) -> None:
-    now = utc_now()
-    db.table("yj64_council_api_workers").upsert({
-        "worker_id": WORKER_ID,
-        "status": status,
-        "version": "yj64-council-worker/1.0.0",
-        "routes": routes,
-        "last_seen_at": now,
-        "updated_at": now,
-    }).execute()
-
-
 def main() -> None:
     # Validate provider secrets before claiming work.
     routes = load_provider_routes()
-    publish_heartbeat("running", list(routes))
+    store = build_queue_store()
+    store.publish_heartbeat(WORKER_ID, "running", list(routes))
     print(
         f"YJ-64 Council worker {WORKER_ID} ready; routes={','.join(routes)}; "
         f"concurrency={WORKER_CONCURRENCY}",
         flush=True,
     )
     # Each instance processes up to WORKER_CONCURRENCY independent requests.
-    # Additional Render instances claim other rows through the same SKIP LOCKED RPC.
+    # Additional instances claim rows through the database's atomic claim operation.
     with ThreadPoolExecutor(max_workers=WORKER_CONCURRENCY) as executor:
         active = set()
         while not stop_event.is_set():
             try:
-                publish_heartbeat("running", list(routes))
-                fail_exhausted_leases()
+                store.publish_heartbeat(WORKER_ID, "running", list(routes))
+                store.fail_exhausted_leases()
                 while not stop_event.is_set() and len(active) < WORKER_CONCURRENCY:
-                    claimed = db.rpc("yj64_claim_council_api_request", {
-                        "p_worker_id": WORKER_ID, "p_lease_seconds": LEASE_SECONDS,
-                    }).execute().data or []
-                    if not claimed:
+                    row = store.claim(WORKER_ID, LEASE_SECONDS)
+                    if row is None:
                         break
-                    row = claimed[0] if isinstance(claimed, list) else claimed
-                    active.add(executor.submit(process, row, routes))
+                    active.add(executor.submit(process, store, row, routes))
                 if active:
                     completed, active = wait(
                         active, timeout=POLL_SECONDS, return_when=FIRST_COMPLETED
@@ -204,17 +142,14 @@ def main() -> None:
                 else:
                     stop_event.wait(POLL_SECONDS)
             except Exception as exc:
-                print(f"worker loop error: {type(exc).__name__}: {str(exc)[:1000]}", flush=True)
+                print(
+                    f"worker loop error: {type(exc).__name__}: {str(exc)[:1000]}",
+                    flush=True,
+                )
                 stop_event.wait(min(30, POLL_SECONDS * 3))
 
 
 def shutdown(_signum: int, _frame: Any) -> None:
-    try:
-        db.table("yj64_council_api_workers").update({
-            "status": "stopping", "last_seen_at": utc_now(), "updated_at": utc_now(),
-        }).eq("worker_id", WORKER_ID).execute()
-    except Exception:
-        pass
     stop_event.set()
 
 
