@@ -396,6 +396,8 @@ def generate_response(
     mode: str = "text",
     operation_id: str | None = None,
     config_override: dict[str, str] | None = None,
+    timeout_seconds: int = 30,
+    max_output_tokens: int = 4096,
 ) -> dict[str, Any]:
     """Single gateway entry point; mode and route are markers, not API details.
 
@@ -488,7 +490,10 @@ def generate_response(
     elif provider in {"gemini", "google", "google-gemini"}:
         base = (config["endpoint"] or PROVIDER_DEFAULTS["gemini"]).rstrip("/")
         url = f"{base}/models/{model}:generateContent"
-        payload = {"contents": _gemini_contents(prompt, history)}
+        payload = {
+            "contents": _gemini_contents(prompt, history),
+            "generationConfig": {"maxOutputTokens": max_output_tokens},
+        }
         headers = {"x-goog-api-key": key}
         api_method = "generateContent"
     elif provider in {"openai", "openai-responses"}:
@@ -498,12 +503,14 @@ def generate_response(
             payload = {
                 "model": model,
                 "messages": history or [{"role": "user", "content": prompt}],
+                "max_tokens": max_output_tokens,
             }
         else:
             url = endpoint if endpoint.endswith("/responses") else endpoint + "/responses"
             payload = {
                 "model": model,
                 "input": history or [{"role": "user", "content": prompt}],
+                "max_output_tokens": max_output_tokens,
             }
         headers = {"Authorization": f"Bearer {key}"}
         api_method = "responses" if url.endswith("/responses") else "chat_completions"
@@ -515,6 +522,7 @@ def generate_response(
         payload = {
             "model": model,
             "messages": history or [{"role": "user", "content": prompt}],
+            "max_tokens": max_output_tokens,
         }
         headers = {"Authorization": f"Bearer {key}"}
         if provider == "openrouter":
@@ -541,7 +549,7 @@ def generate_response(
     service_unavailable_attempt = 0
     while True:
         try:
-            data = _request("POST", url, headers, payload=payload)
+            data = _request("POST", url, headers, timeout=max(5, min(86400, int(timeout_seconds))), payload=payload)
             break
         except Exception as exc:
             message = str(exc)
