@@ -17,9 +17,9 @@ The engine may receive dependencies through constructor arguments/callbacks. It 
 
 | Boundary | Current implementation | Portable replacement |
 |---|---|---|
-| HTTP ingress | Supabase Edge Function `council-api` | Containerized HTTP API with the same JSON contract |
-| Queue and task state | Supabase PostgREST + RPC | PostgreSQL adapter using standard SQL transactions and row locking |
-| Worker registry | Supabase table | PostgreSQL table and heartbeat |
+| HTTP ingress | Portable FastAPI `cloud_worker/api.py`; Supabase Edge Function retained as fallback | Same API container behind any HTTPS reverse proxy |
+| Queue and task state | PostgreSQL `PostgresQueueStore`; Supabase adapter retained as fallback | Standard PostgreSQL with `FOR UPDATE SKIP LOCKED` |
+| Worker registry | PostgreSQL worker table and heartbeat; Supabase compatibility adapter | PostgreSQL table and heartbeat |
 | Provider access | Shared `llm_api.py` router | Keep same router; inject route config from secrets |
 | Durable files | No authoritative worker-local storage | PostgreSQL metadata + optional S3-compatible object storage |
 
