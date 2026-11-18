@@ -26,7 +26,10 @@ jobs:
           SUPABASE_PUBLISHABLE_KEY: sb_publishable_rR7g4vyqvpgjhJjSMoYppA_yr59k8Yi
         run: |
           set -euo pipefail
-          health="$(curl --fail --silent --show-error -H "apikey: $SUPABASE_PUBLISHABLE_KEY" "$API_BASE/health")"
+          code="$(curl --silent --show-error --output /tmp/health.json --write-out '%{http_code}' -H "apikey: $SUPABASE_PUBLISHABLE_KEY" "$API_BASE/health")"
+          cat /tmp/health.json
+          test "$code" = "200"
+          health="$(cat /tmp/health.json)"
           echo "$health" | jq -e '.api == "up" and .database == "up" and .ready_for_requests == false and .council_engine == "not_connected" and .worker == "not_deployed"'
       - name: Verify protocol header is mandatory
         env:
