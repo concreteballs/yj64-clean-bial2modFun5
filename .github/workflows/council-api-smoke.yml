@@ -20,16 +20,17 @@ jobs:
       - name: Check public health endpoint and readiness gate
         env:
           API_BASE: https://ggambesixwejgbjwtnhw.supabase.co/functions/v1/council-api
+          SUPABASE_PUBLISHABLE_KEY: sb_publishable_rR7g4vyqvpgjhJjSMoYppA_yr59k8Yi
         run: |
           set -euo pipefail
-          health="$(curl --fail --silent --show-error "$API_BASE/health")"
+          health="$(curl --fail --silent --show-error -H "apikey: $SUPABASE_PUBLISHABLE_KEY" "$API_BASE/health")"
           echo "$health" | jq -e '.api == "up" and .database == "up" and .ready_for_requests == false and .council_engine == "not_connected" and .worker == "not_deployed"'
       - name: Verify protocol header is mandatory
         env:
           API_BASE: https://ggambesixwejgbjwtnhw.supabase.co/functions/v1/council-api
         run: |
           set -euo pipefail
-          code="$(curl --silent --output /tmp/protocol.json --write-out '%{http_code}' "$API_BASE/api/v1/external-agents/council/requests/00000000-0000-4000-8000-000000000001")"
+          code="$(curl --silent --output /tmp/protocol.json --write-out '%{http_code}' -H "apikey: $SUPABASE_PUBLISHABLE_KEY" "$API_BASE/api/v1/external-agents/council/requests/00000000-0000-4000-8000-000000000001")"
           test "$code" = "400"
           jq -e '.error == "unsupported_protocol_version"' /tmp/protocol.json
       - name: Verify invalid machine credentials are rejected
@@ -38,6 +39,7 @@ jobs:
         run: |
           set -euo pipefail
           code="$(curl --silent --output /tmp/auth.json --write-out '%{http_code}' \
+            -H "apikey: $SUPABASE_PUBLISHABLE_KEY" \
             -H 'X-YJ64-Protocol-Version: yj64.council-api.v1' \
             -H 'Authorization: Bearer deliberately-invalid-test-token-000000' \
             "$API_BASE/api/v1/external-agents/council/requests/00000000-0000-4000-8000-000000000001")"
