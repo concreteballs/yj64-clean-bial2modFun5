@@ -9,6 +9,7 @@ import json
 import os
 import re
 import tempfile
+import time
 import uuid
 from typing import Any, Callable
 
@@ -99,6 +100,8 @@ class CouncilEngine:
             mode="text",
             history=history,
             config_override=config,
+            timeout_seconds=timeout_seconds,
+            max_output_tokens=max_output_tokens,
         )
         response = str(result.get("response") or "").strip()
         if not response:
@@ -123,6 +126,7 @@ class CouncilEngine:
         max_rounds = int(limits["max_rounds"])
         timeout_seconds = int(limits["timeout_seconds"])
         max_tokens = int(limits["max_output_tokens"])
+        started_at = time.monotonic()
         positions: dict[str, str] = {}
         critiques: dict[str, list[str]] = {route: [] for route in participants}
         final_positions: list[dict[str, Any]] = []
@@ -152,6 +156,8 @@ class CouncilEngine:
             for route in participants:
                 if is_cancelled():
                     raise CouncilCancelled("Cancellation requested")
+                if time.monotonic() - started_at >= timeout_seconds:
+                    raise TimeoutError("Council session timeout exceeded")
                 other_views = {name: value for name, value in positions.items() if name != route}
                 critique_prompt = (
                     f"Critique round {round_no} of {critique_rounds}. Task: {title}\n{prompt}\n\n"
@@ -188,7 +194,7 @@ class CouncilEngine:
                 f"Requester evidence references: {json.dumps(refs, ensure_ascii=False)}\n"
                 f"{schema_instruction}"
             )
-            raw = self._call(route, final_prompt, [{"role": "user", "content": final_prompt}], max_tokens, timeout_seconds)
+            raw = self._call(route, final_prompt, [{"role": "user", "content": final_prompt}], max_tokens, min(timeout_seconds, max(5, int(timeout_seconds - (time.monotonic() - started_at)))))
             try:
                 parsed = _parse_json_object(raw)
             except ValueError as exc:
