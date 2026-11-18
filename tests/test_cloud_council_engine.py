@@ -26,6 +26,46 @@ class EngineContractTests(unittest.TestCase):
     def test_json_parser_accepts_fenced_or_surrounded_object(self):
         self.assertEqual(_parse_json_object('Result: {"verdict":"agree"}'), {"verdict": "agree"})
 
+
+    def test_engine_runs_real_council_lifecycle_and_classifies_disagreement(self):
+        routes = {
+            "route_1": {"provider": "openai", "model": "x", "api_key": "secret"},
+            "route_2": {"provider": "gemini", "model": "y", "api_key": "secret2"},
+        }
+
+        class FakeEngine(CouncilEngine):
+            def _call(self, route_id, prompt, history, max_output_tokens, timeout_seconds):
+                if "Return ONLY one valid JSON object" in prompt:
+                    verdict = "agree" if route_id == "route_1" else "conditional"
+                    return json.dumps({
+                        "verdict": verdict,
+                        "position": f"{route_id} position",
+                        "rationale": "Test rationale",
+                        "claims": [{
+                            "statement": "A testable claim",
+                            "epistemic_type": "hypothesis",
+                            "reasoning": "Mocked test",
+                            "evidence_refs": ["source-1"],
+                        }],
+                        "unresolved_questions": ["Need a measurement"],
+                        "assumptions": [],
+                        "limitations": [],
+                        "evidence_refs": ["source-1"],
+                    })
+                return f"{route_id} analysis"
+
+        request = {
+            "mode": "consensus",
+            "task": {"title": "Test", "prompt": "Evaluate", "context": {}, "evidence_refs": ["source-1"]},
+            "limits": {"max_rounds": 1, "timeout_seconds": 60, "max_output_tokens": 512},
+            "voting": {"enabled": True, "weighted": False},
+        }
+        result = FakeEngine(routes=routes).run(request, "request-1", "session-1")
+        self.assertEqual(result["outcome"], "qualified_consensus")
+        self.assertEqual(len(result["participant_positions"]), 2)
+        self.assertEqual(len(result["claims"]), 2)
+        self.assertEqual(result["voting_summary"]["aggregate_counts"]["conditional"], 1)
+
     def test_result_validator_rejects_private_fields(self):
         bad = {
             "protocol_version": "yj64.council-api.v1",
