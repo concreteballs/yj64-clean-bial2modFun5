@@ -386,3 +386,19 @@ Acceptance tests:
 - [ ] End-to-end проверка повторной доставки после остановки/перезапуска обоих приложений.
 
 **Текущее ограничение проверки:** исходники обеих сторон IPC теперь доступны в одном репозитории и сверены по authority `org.blackmirror.yj64monitor.diagnostics`, method `receive_report`, permission `org.blackmirror.yj64monitor.permission.RECEIVE_REPORT` и schema `yj64.diagnostic.v1`. Фактический запуск двух приложений и IPC нельзя считать доказанным только по статическому аудиту или успешной сборке.
+
+
+### Run #22 — сборки завершились, эмуляторный IPC-тест заблокирован тестовым скриптом
+
+- [x] Guard и компиляция Python прошли.
+- [x] Все unit tests диагностического spool прошли.
+- [x] Base APK ARM64 собран.
+- [x] Base APK x86_64 собран.
+- [x] Standalone Monitor APK собран и проверен на наличие файла.
+- [x] Android 35 emulator загрузился и сообщил `sys.boot_completed=1`.
+- [ ] Base ↔ Monitor IPC не проверен: шаг теста завершился до установки APK.
+- [x] Диагностическая причина найдена в тестовом shell: переменные `MONITOR_APK` и `BASE_APK` объявлялись в отдельных shell-вызовах, поэтому на `adb install` пути передавались пустыми. Ошибка `adb: filename doesn't end .apk or .apex:` подтверждает пустой аргумент; это ошибка harness, не доказанная ошибка приложения.
+- [x] Исправлен emulator script: весь блок запуска завернут в один `bash -euo pipefail -c`, чтобы локальные переменные и цикл ожидания отчёта сохраняли scope; APK пути заданы явно.
+- [ ] Повторный CI run должен подтвердить реальную установку, запуск и доставку IPC отчёта.
+- Artifact Run #22: [yj64-android-debug-22](https://github.com/concreteballs/yj64-clean-bial2modFun5/actions/runs/44233515880/artifacts/14397501425) (содержит собранные APK); logs artifact: [yj64-android-build-logs-22](https://github.com/concreteballs/yj64-clean-bial2modFun5/actions/runs/44233515880/artifacts/14397635491).
+
