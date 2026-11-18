@@ -24,6 +24,8 @@ LEASE_SECONDS = max(60, min(900, int(os.environ.get("YJ64_WORKER_LEASE_SECONDS",
 WORKER_ID = os.environ.get("YJ64_WORKER_ID") or f"{socket.gethostname()}-{uuid.uuid4().hex[:12]}"
 
 stop_event = threading.Event()
+runtime_store: QueueStore | None = None
+runtime_routes: list[str] = []
 
 
 def build_queue_store() -> QueueStore:
@@ -106,8 +108,11 @@ def process(
 
 def main() -> None:
     # Validate provider secrets before claiming work.
+    global runtime_store, runtime_routes
     routes = load_provider_routes()
     store = build_queue_store()
+    runtime_store = store
+    runtime_routes = list(routes)
     store.publish_heartbeat(WORKER_ID, "running", list(routes))
     print(
         f"YJ-64 Council worker {WORKER_ID} ready; routes={','.join(routes)}; "
@@ -151,6 +156,11 @@ def main() -> None:
 
 def shutdown(_signum: int, _frame: Any) -> None:
     stop_event.set()
+    if runtime_store is not None:
+        try:
+            runtime_store.publish_heartbeat(WORKER_ID, "stopping", runtime_routes)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
