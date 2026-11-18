@@ -116,9 +116,22 @@ Deno.serve(async (req: Request) => {
   const markerIndex = path.indexOf(marker);
   if (markerIndex >= 0) path = path.slice(markerIndex + marker.length) || "/";
   if (req.method === "GET" && (path === "/health" || path.endsWith("/health") || url.pathname.endsWith("/health"))) {
-    const { error } = await db.from("yj64_council_api_requests").select("request_id").limit(1);
-    if (error) return json({ status: "degraded", api: "up", database: "unavailable", council_engine: "not_connected", ready_for_requests: false }, 503);
-    return json({ status: "ok", api: "up", database: "up", council_engine: "not_connected", worker: "not_deployed", ready_for_requests: false });
+    const { error: dbError } = await db.from("yj64_council_api_requests").select("request_id").limit(1);
+    if (dbError) return json({ status: "degraded", api: "up", database: "unavailable", council_engine: "not_connected", worker: "unknown", ready_for_requests: false }, 503);
+    const cutoff = new Date(Date.now() - 120_000).toISOString();
+    const { data: workers, error: workerError } = await db.from("yj64_council_api_workers")
+      .select("worker_id,routes,last_seen_at").eq("status", "running").gt("last_seen_at", cutoff).limit(5);
+    const workerReady = !workerError && Array.isArray(workers) && workers.length > 0;
+    const adapterReady = Deno.env.get("YJ64_COUNCIL_ENGINE_ADAPTER") === "ready";
+    const enabled = Deno.env.get("YJ64_COUNCIL_WORKER_ENABLED") === "true";
+    const ready = workerReady && adapterReady && enabled;
+    return json({
+      status: "ok", api: "up", database: "up",
+      council_engine: adapterReady ? "configured" : "not_connected",
+      worker: workerReady ? "running" : "not_deployed",
+      active_workers: workerReady ? workers.length : 0,
+      ready_for_requests: ready
+    });
   }
 
   const versionHeader = req.headers.get("x-yj64-protocol-version");
@@ -129,6 +142,12 @@ Deno.serve(async (req: Request) => {
     if (Deno.env.get("YJ64_COUNCIL_WORKER_ENABLED") !== "true" ||
         Deno.env.get("YJ64_COUNCIL_ENGINE_ADAPTER") !== "ready") {
       return json({ error: "council_engine_not_ready", message: "Request intake is disabled until the real Council worker and server-side engine adapter are deployed." }, 503);
+    }
+    const workerCutoff = new Date(Date.now() - 120_000).toISOString();
+    const { data: liveWorkers, error: workerLookupError } = await db.from("yj64_council_api_workers")
+      .select("worker_id").eq("status", "running").gt("last_seen_at", workerCutoff).limit(1);
+    if (workerLookupError || !liveWorkers?.length) {
+      return json({ error: "council_worker_unavailable", message: "No live Council worker heartbeat is available." }, 503);
     }
     const auth = await authenticate(req, "council:submit");
     if ("error" in auth) return auth.error;
