@@ -89,3 +89,26 @@ jobs:
             "$API_BASE/api/v1/external-agents/council/requests")"
           test "$code" = "503"
           jq -e '.error == "council_engine_not_ready"' /tmp/gate.json
+      - name: Verify result and cancel routes require machine authentication
+        env:
+          API_BASE: https://ggambesixwejgbjwtnhw.supabase.co/functions/v1/council-api
+        run: |
+          set -euo pipefail
+          request_id="00000000-0000-4000-8000-000000000001"
+          result_code="$(curl --silent --output /tmp/result-auth.json --write-out '%{http_code}' \
+            -H "apikey: $SUPABASE_PUBLISHABLE_KEY" \
+            -H 'X-YJ64-Protocol-Version: yj64.council-api.v1' \
+            -H 'Authorization: Bearer deliberately-invalid-test-token-000000' \
+            "$API_BASE/api/v1/external-agents/council/requests/$request_id/result")"
+          test "$result_code" = "401"
+          jq -e '.error == "unauthorized_or_scope_missing"' /tmp/result-auth.json
+          cancel_code="$(curl --silent --output /tmp/cancel-auth.json --write-out '%{http_code}' \
+            -X POST \
+            -H "apikey: $SUPABASE_PUBLISHABLE_KEY" \
+            -H 'X-YJ64-Protocol-Version: yj64.council-api.v1' \
+            -H 'Authorization: Bearer deliberately-invalid-test-token-000000' \
+            -H 'Content-Type: application/json' \
+            --data '{"protocol_version":"yj64.council-api.v1","agent_id":"smoke-test-agent"}' \
+            "$API_BASE/api/v1/external-agents/council/requests/$request_id/cancel")"
+          test "$cancel_code" = "401"
+          jq -e '.error == "unauthorized_or_scope_missing"' /tmp/cancel-auth.json
