@@ -1,0 +1,45 @@
+name: Council API smoke test
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'supabase/functions/council-api/**'
+      - 'supabase/config.toml'
+      - '.github/workflows/council-api-smoke.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check public health endpoint and readiness gate
+        env:
+          API_BASE: https://ggambesixwejgbjwtnhw.supabase.co/functions/v1/council-api
+        run: |
+          set -euo pipefail
+          health="$(curl --fail --silent --show-error "$API_BASE/health")"
+          echo "$health" | jq -e '.api == "up" and .database == "up" and .ready_for_requests == false and .council_engine == "not_connected" and .worker == "not_deployed"'
+      - name: Verify protocol header is mandatory
+        env:
+          API_BASE: https://ggambesixwejgbjwtnhw.supabase.co/functions/v1/council-api
+        run: |
+          set -euo pipefail
+          code="$(curl --silent --output /tmp/protocol.json --write-out '%{http_code}' "$API_BASE/api/v1/external-agents/council/requests/00000000-0000-4000-8000-000000000001")"
+          test "$code" = "400"
+          jq -e '.error == "unsupported_protocol_version"' /tmp/protocol.json
+      - name: Verify invalid machine credentials are rejected
+        env:
+          API_BASE: https://ggambesixwejgbjwtnhw.supabase.co/functions/v1/council-api
+        run: |
+          set -euo pipefail
+          code="$(curl --silent --output /tmp/auth.json --write-out '%{http_code}' \
+            -H 'X-YJ64-Protocol-Version: yj64.council-api.v1' \
+            -H 'Authorization: Bearer deliberately-invalid-test-token-000000' \
+            "$API_BASE/api/v1/external-agents/council/requests/00000000-0000-4000-8000-000000000001")"
+          test "$code" = "401"
+          jq -e '.error == "unauthorized" or .error == "unauthorized_or_scope_missing"' /tmp/auth.json
