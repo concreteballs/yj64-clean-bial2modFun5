@@ -162,6 +162,8 @@ class PostgresQueueStore:
         )
         if row is None:
             raise LookupError(f"Council request not found: {request_id}")
+        row["request_id"] = str(row["request_id"])
+        row["session_id"] = str(row["session_id"])
         return row
 
     def is_cancelled(self, request_id: str) -> bool:
@@ -244,7 +246,7 @@ class PostgresQueueStore:
         )
 
     def claim(self, worker_id: str, lease_seconds: int) -> dict[str, Any] | None:
-        return self._execute_one(
+        row = self._execute_one(
             """
             WITH candidate AS (
                 SELECT request_id
@@ -274,3 +276,7 @@ class PostgresQueueStore:
             """,
             (worker_id, lease_seconds),
         )
+        if row is not None:
+            row["request_id"] = str(row["request_id"])
+            row["session_id"] = str(row["session_id"])
+        return row
