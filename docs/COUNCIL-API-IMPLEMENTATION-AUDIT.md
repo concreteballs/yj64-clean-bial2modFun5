@@ -74,3 +74,19 @@ The v1 result must carry request/session IDs, protocol version, mode, status and
 - `llm_api.py`: central provider API router.
 - `chat_workspace.py`: local chat/session history storage.
 - `docs/YJ64-CLOUD-DEPLOYMENT-AND-INTEGRATION-PLAN.md`: sections 8.1 and 8.2 for consensus integrity and external API requirements.
+
+
+## 9. Cloud engine extraction update — 2026-11-18
+
+The existing provider router was retained as the sole provider-specific HTTP implementation. Its `generate_response` entry point now accepts an optional server-side route configuration override and request timeout/output-token limits. Existing Android callers remain compatible and continue to load configuration from app-private storage.
+
+New cloud components:
+- `cloud_worker/engine.py`: independent positions, critique rounds, final structured positions, verdict classification and result validation.
+- `cloud_worker/worker.py`: durable queue claims, worker heartbeats, lease renewal, cancellation checks, retries and result persistence.
+- `cloud_worker/Dockerfile`, `requirements.txt`, and `README.md`: container build and deployment instructions.
+- `tests/test_cloud_council_engine.py`: provider configuration and result-contract tests, including a mocked end-to-end Council lifecycle.
+- `.github/workflows/council-worker-tests.yml`: compile, test and Docker build.
+
+The worker uses server-only `YJ64_COUNCIL_PROVIDER_CONFIG` and Supabase service role secrets. No provider keys were committed or copied from the Android app.
+
+**Not yet deployed:** the worker container has no selected external host, and real provider secrets are not provisioned. Edge API submit remains disabled until a live worker heartbeat is present and both activation flags are enabled. This is not yet a production-ready live Council API.
