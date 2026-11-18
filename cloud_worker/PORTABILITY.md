@@ -23,7 +23,7 @@ The engine may receive dependencies through constructor arguments/callbacks. It 
 | Provider access | Shared `llm_api.py` router | Keep same router; inject route config from secrets |
 | Durable files | No authoritative worker-local storage | PostgreSQL metadata + optional S3-compatible object storage |
 
-The worker now depends on the `QueueStore` protocol in `cloud_worker/queue_store.py`. `SupabaseQueueStore` preserves the current PostgREST/RPC behavior. The protocol is the portability boundary, but only the Supabase implementation exists today; this is not yet database-provider independence. Do not configure another backend until its implementation passes the queue contract and recovery tests.
+The worker depends on the `QueueStore` protocol in `cloud_worker/queue_store.py`. `SupabaseQueueStore` preserves the current PostgREST/RPC behavior; `PostgresQueueStore` uses the standalone PostgreSQL schema and atomic row locking. The portable FastAPI ingress in `cloud_worker/api.py` implements the existing public JSON contract against that same PostgreSQL database. The standalone deployment is now code-complete at the adapter/API layer, but remains gated on CI and authenticated end-to-end verification.
 
 ## Configuration contract
 
@@ -38,19 +38,19 @@ The worker now depends on the `QueueStore` protocol in `cloud_worker/queue_store
 
 ## Migration order
 
-1. Run the existing Supabase-backed worker on a free Linux VM. This is the smallest-risk first deployment.
+1. [x] Keep the existing Supabase-backed deployment available as the fallback path.
 2. [x] Extract current Supabase calls from `worker.py` into a `QueueStore` interface and preserve behavior with a Supabase implementation.
 3. [x] Add a PostgreSQL implementation using atomic claim transactions (`FOR UPDATE SKIP LOCKED`), lease renewal, cancellation, progress, terminal-state writes and worker heartbeat. Standalone schema: `postgres/schema.sql`.
-4. Add integration tests against a disposable PostgreSQL container, including concurrent claims and expired-lease recovery. The CI integration suite is being added; do not treat the adapter as production-validated until that workflow passes.
-5. Containerize the HTTP ingress behind the existing API contract; move off Supabase Edge Functions only after authenticated E2E tests pass.
-6. Verify backup/export/restore, then move database and worker together or independently.
+4. [x] Add PostgreSQL integration tests for concurrent claims, expired-lease recovery, cancellation and result persistence.
+5. [x] Containerize the HTTP ingress behind the existing API contract; CI exercises submit, idempotency, status and cancellation against disposable PostgreSQL.
+6. Verify CI, provision and restore a real database backup, then perform authenticated provider E2E before opening intake.
 
 ## Provider portability acceptance tests
 
 A release is not called portable until:
 
 - The same image starts on amd64 and arm64.
-- The same worker contract tests pass against Supabase and standard PostgreSQL adapters.
+- The same queue contract tests pass against Supabase and standard PostgreSQL adapters.
 - A queued task survives worker/container restart.
 - Expired leases are recovered without duplicate terminal results.
 - SIGTERM does not lose acknowledged task state.
