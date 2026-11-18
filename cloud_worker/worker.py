@@ -148,13 +148,27 @@ def fail_exhausted_leases() -> None:
             }).eq("request_id", row["request_id"]).eq("status", "running").execute()
 
 
+def publish_heartbeat(status: str, routes: list[str]) -> None:
+    now = utc_now()
+    db.table("yj64_council_api_workers").upsert({
+        "worker_id": WORKER_ID,
+        "status": status,
+        "version": "yj64-council-worker/1.0.0",
+        "routes": routes,
+        "last_seen_at": now,
+        "updated_at": now,
+    }).execute()
+
+
 def main() -> None:
     # Validate provider secrets before claiming work.
     routes = load_provider_routes()
     engine = CouncilEngine(routes=routes)
+    publish_heartbeat("running", list(routes))
     print(f"YJ-64 Council worker {WORKER_ID} ready; routes={','.join(routes)}", flush=True)
     while not stop_event.is_set():
         try:
+            publish_heartbeat("running", list(routes))
             fail_exhausted_leases()
             claimed = db.rpc("yj64_claim_council_api_request", {
                 "p_worker_id": WORKER_ID, "p_lease_seconds": LEASE_SECONDS,
@@ -172,6 +186,12 @@ def main() -> None:
 
 
 def shutdown(_signum: int, _frame: Any) -> None:
+    try:
+        db.table("yj64_council_api_workers").update({
+            "status": "stopping", "last_seen_at": utc_now(), "updated_at": utc_now(),
+        }).eq("worker_id", WORKER_ID).execute()
+    except Exception:
+        pass
     stop_event.set()
 
 
