@@ -953,3 +953,28 @@ https://github.com/concreteballs/yj64-clean-bial2modFun5/actions/runs/4439259191
 - submit без включённого реального worker/engine возвращает `503 council_engine_not_ready`, а не принимает невыполнимую задачу.
 
 Это успешный smoke test транспортного слоя и защитного readiness gate. Это **не** тест реального запуска моделей или E2E с Gateway.
+
+
+---
+
+## 8.3.14. Расширенная проверка API v1 — 2026-11-18
+
+GitHub Actions `Council API smoke test`, run **#9**, завершился **success**:
+https://github.com/concreteballs/yj64-clean-bial2modFun5/actions/runs/44392734695
+
+Дополнительно к run #8 проверены защищённые маршруты result и cancel: оба отклоняют неверный machine token. Всего зелёными прошли:
+- API + database health;
+- обязательность `X-YJ64-Protocol-Version`;
+- отказ неверной machine credentials на status/result/cancel;
+- закрытый submit при отсутствии реального worker/engine (`503 council_engine_not_ready`).
+
+Повторная проверка БД подтвердила:
+- все три `yj64_council_api_*` таблицы имеют RLS;
+- `anon` и `authenticated` не имеют SELECT; доступ есть только у `service_role`;
+- audit sequence недоступна `anon`/`authenticated`;
+- claim-функция исполняется только `service_role`;
+- зарегистрированных machine agents пока 0; request rows 0. Тестовые запросы не создавали записей и не запускали модели.
+
+**Важная интеграционная зависимость:** Supabase API Gateway требует публичный `apikey` header с publishable key. Gateway должен передавать его дополнительно к секретному `Authorization: Bearer`. Это изменение должно быть внесено в Gateway в его отдельном рабочем цикле; репозиторий Engineering Core здесь не менялся.
+
+Итоговый статус: транспорт и защитный readiness gate развёрнуты и проверены. Submit остаётся намеренно закрытым. Реальный worker, server-side Council engine adapter, provider secrets, machine agent registration и live E2E остаются незавершёнными.
