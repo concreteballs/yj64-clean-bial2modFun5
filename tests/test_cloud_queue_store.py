@@ -1,6 +1,6 @@
 """Tests for the queue persistence boundary and Supabase compatibility adapter."""
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 from cloud_worker.queue_store import SupabaseQueueStore
 
@@ -38,10 +38,13 @@ class QueueStoreAdapterTests(unittest.TestCase):
         table = self.client.table
         table.assert_called_with("yj64_council_api_requests")
         table.return_value.update.assert_called_once()
-        table.return_value.update.return_value.eq.assert_any_call("request_id", "r-1")
-        table.return_value.update.return_value.eq.return_value.eq.assert_called_with(
-            "status", "running"
-        )
+        eq = table.return_value.update.return_value.eq
+        eq.assert_has_calls([
+            call("request_id", "r-1"),
+            call("worker_id", "worker-1"),
+            call("status", "running"),
+        ])
+        table.return_value.update.return_value.execute.assert_called_once()
 
     def test_terminal_completion_clears_lease_and_errors(self):
         self.store.mark_completed("r-1", "worker-1", {"outcome": "consensus"})
