@@ -4,9 +4,9 @@ The Council worker is a separate persistent Linux container. Do not run it insid
 
 ## Current deployment model
 
-The first low-risk deployment runs the existing worker container on a Linux VM while retaining the current Supabase Edge Function and PostgreSQL project for API ingress and queue storage. This avoids migrating API, worker and database at the same time.
+The repository now contains a standalone FastAPI ingress (`cloud_worker/api.py`) and PostgreSQL worker adapter. The standalone Compose stack runs both containers against one PostgreSQL database. Keep the existing Supabase Edge Function deployment as a fallback until the standalone stack passes its full authenticated end-to-end acceptance test.
 
-The worker now routes persistence through `cloud_worker/queue_store.py`. Both `SupabaseQueueStore` and `PostgresQueueStore` are implemented. The PostgreSQL adapter uses the standalone schema at `cloud_worker/postgres/schema.sql` and standard atomic row locking. However, the current Supabase Edge Function still writes to the Supabase database: do not select `YJ64_QUEUE_BACKEND=postgres` until the API ingress is also pointed at the same standalone PostgreSQL database. The worker and API must never read/write separate queues. See [PORTABILITY.md](PORTABILITY.md).
+The worker routes persistence through `cloud_worker/queue_store.py`. The standalone API and worker both use `DATABASE_URL`; the worker selects `YJ64_QUEUE_BACKEND=postgres`. Do not run a PostgreSQL worker against the Supabase Edge Function or a Supabase worker against the standalone API: each pair must share one database. See [PORTABILITY.md](PORTABILITY.md).
 
 ## Hosting choice
 
@@ -22,7 +22,7 @@ Always re-check provider limits at provisioning time:
 
 ## Build and run
 
-Build from repository root:
+Build from repository root (Compose builds the same image for API and worker):
 
 ```sh
 docker build -f cloud_worker/Dockerfile -t yj64-council-worker:latest .
@@ -75,12 +75,12 @@ Do not enable `YJ64_COUNCIL_ENGINE_ADAPTER=ready` or `YJ64_COUNCIL_WORKER_ENABLE
 
 ## Standalone PostgreSQL backend
 
-The portable worker backend is selected with `YJ64_QUEUE_BACKEND=postgres` and `DATABASE_URL`. Apply `cloud_worker/postgres/schema.sql` to the target PostgreSQL database before starting the worker. Keep `YJ64_QUEUE_BACKEND=supabase` for the current hosted Edge Function deployment. Switching only the worker is unsafe: the existing Edge Function must first be migrated or replaced so that intake, status, cancellation and result reads all use this same PostgreSQL database. The PostgreSQL backend is not activated by default.
+The standalone API always uses `DATABASE_URL`; the worker uses that same value with `YJ64_QUEUE_BACKEND=postgres`. Apply `cloud_worker/postgres/schema.sql` before starting either service. The old Supabase Edge Function remains a separate deployment path and must only be paired with the Supabase-backed worker.
 
 ## Moving to paid or self-hosted infrastructure
 
-The same Docker image and environment contract should be reused. For a self-hosted PostgreSQL/API deployment, first implement and test the standard PostgreSQL queue adapter and containerized API described in [PORTABILITY.md](PORTABILITY.md). Export the database, restore into the target PostgreSQL instance, verify row counts and representative task histories, then switch connection configuration. Do not couple application logic to Oracle, Google Cloud, Render or any host-specific API.
+The same OCI image and environment contract should be reused. Export PostgreSQL, restore into the target PostgreSQL instance, verify row counts and representative task histories, then switch `DATABASE_URL`. Do not couple application logic to Oracle, Google Cloud, Render or any host-specific API.
 
 ## What CI proves
 
-The Council Worker CI workflow compiles the router/worker, runs deterministic Council tests, Supabase adapter tests and PostgreSQL integration tests against a disposable PostgreSQL 16 service, then builds the Docker image. A passing run validates the tested queue operations, not API migration, cloud provisioning, real provider credentials, billing or production uptime.
+The Council Worker CI workflow compiles the router, worker and API; runs deterministic engine/API tests plus queue and HTTP contract integration tests against disposable PostgreSQL 16; and builds AMD64 and ARM64 OCI images. A passing run validates the tested contracts, not real provider credentials, cloud provisioning, billing, backups or production uptime.
