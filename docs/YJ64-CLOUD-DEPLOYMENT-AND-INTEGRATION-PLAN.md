@@ -1052,3 +1052,10 @@ https://github.com/concreteballs/yj64-clean-bial2modFun5/actions/runs/4439273469
 5. Только после E2E проверки выставить Edge Function secrets `YJ64_COUNCIL_ENGINE_ADAPTER=ready` и `YJ64_COUNCIL_WORKER_ENABLED=true`.
 
 **Текущий статус:** код серверного движка и worker подготовлен; cloud worker deployment и live provider test остаются открытыми. Никакой имитации выполнения нет.
+
+
+### Результат актуального CI — 2026-11-18
+
+Актуальный код worker/router на SHA `1801fe759bcceefafa843ff0d5a507f085e4a0f9` прошёл workflow `Council worker tests`: компиляция Python, unit tests адаптера и Docker image build — **success**. Run: https://github.com/concreteballs/yj64-clean-bial2modFun5/actions/runs/44394401006.
+
+Проверка не использовала реальные provider API keys и не выполняла живой Council запрос. Persistent worker host, runtime secrets и live E2E остаются обязательными следующими воротами.
