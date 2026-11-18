@@ -172,7 +172,7 @@ Deno.serve(async (req: Request) => {
     return json({ protocol_version: VERSION, request_id: data.request_id, session_id: data.session_id, status: "accepted" }, 202);
   }
 
-  const match = path.match(/^\/api\/v1\/external-agents\/council\/requests\/([0-9a-f-]{36})(\/result|\/cancel)?$/i);
+  const match = path.match(/\/api\/v1\/external-agents\/council\/requests\/([0-9a-f-]{36})(\/result|\/cancel)?$/i);
   if (!match) return json({ error: "not_found" }, 404);
   const requestId = match[1];
   const suffix = match[2] ?? "";
