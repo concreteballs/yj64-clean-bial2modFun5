@@ -18,7 +18,7 @@ The Android Base and Monitor APKs are not server deployment artifacts. The Andro
 
 ## Current coupling that must be isolated before moving off Supabase
 
-The worker now uses the `QueueStore` protocol (`cloud_worker/queue_store.py`) and a `SupabaseQueueStore` compatibility implementation. That adapter still uses:
+The worker now uses the `QueueStore` protocol (`cloud_worker/queue_store.py`) with two implementations: `SupabaseQueueStore` for the current deployment and `PostgresQueueStore` for a standalone PostgreSQL database (`cloud_worker/postgres/schema.sql`). The Supabase adapter still uses:
 
 - `supabase.create_client()`
 - PostgREST table operations
@@ -91,7 +91,7 @@ The initial Oracle VM deployment can run the worker container while the existing
 - No external worker host has been provisioned.
 - Real provider routes and secrets are not yet installed in a host secret manager.
 - No authenticated live provider E2E has been run.
-- The worker has a queue-store abstraction, but only its Supabase implementation exists; a self-hosted PostgreSQL deployment is not yet plug-compatible.
+- The PostgreSQL adapter and standalone schema are implemented, but the current Edge Function still targets Supabase. A complete self-hosted deployment also requires moving/replacing API ingress and validating the end-to-end flow against one shared database.
 - The worker CI proves deterministic adapter behavior and container build, not cloud deployment, provider credentials, billing, uptime or database portability.
 
 ## Safe activation sequence
