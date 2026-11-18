@@ -24,7 +24,7 @@ Re-check official limits before creating an instance:
 
 ## PostgreSQL preparation
 
-The Compose stack includes PostgreSQL 16 with a persistent named volume. On first initialization, the database container creates a non-login schema owner, a separate restricted `yj64_runtime` role, applies `00-runtime-role.sql`, `schema.sql` and `02-runtime-grants.sql` in order, and grants the API/worker only the table and sequence privileges they need. The owner password is used only by the database container; the runtime password is used by API and worker. PostgreSQL is not published on a host port; only the API's loopback port is exposed.
+The Compose stack includes PostgreSQL 16 with a persistent named volume. On first initialization, the database container creates a database-owner/admin role and a separate restricted `yj64_runtime` role, applies `00-runtime-role.sql`, `schema.sql` and `02-runtime-grants.sql` in order, and grants the API/worker only the table and sequence privileges they need. The owner password is used only by the database container; the runtime password is used by API and worker. PostgreSQL is not published on a host port; only the API's loopback port is exposed.
 
 Set a URL-safe random password (hex characters avoid connection-string escaping problems):
 
