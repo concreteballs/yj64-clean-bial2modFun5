@@ -3,11 +3,48 @@ services:
     build:
       context: ..
       dockerfile: cloud_worker/Dockerfile
-    image: yj64-council-worker:latest
+    image: yj64-council:latest
     init: true
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      YJ64_QUEUE_BACKEND: postgres
     stop_grace_period: 90s
-    # No public port: the worker only polls the authenticated queue.
-    # Keep the host filesystem out of the container; durable state lives in PostgreSQL.
+    # No public inbound port: worker claims jobs from the shared PostgreSQL queue.
+
+  council-api:
+    build:
+      context: ..
+      dockerfile: cloud_worker/Dockerfile
+    image: yj64-council:latest
+    command:
+      - uvicorn
+      - cloud_worker.api:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --proxy-headers
+      - --forwarded-allow-ips=127.0.0.1
+    init: true
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      YJ64_API_DB_POOL_SIZE: ${YJ64_API_DB_POOL_SIZE:-8}
+    depends_on:
+      council-worker:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=4)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
