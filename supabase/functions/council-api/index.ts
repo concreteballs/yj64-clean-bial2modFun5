@@ -125,7 +125,7 @@ Deno.serve(async (req: Request) => {
   if (versionHeader !== VERSION) return json({ error: "unsupported_protocol_version" }, 400);
 
   const submitPath = "/api/v1/external-agents/council/requests";
-  if (req.method === "POST" && path === submitPath) {
+  if (req.method === "POST" && path.endsWith(submitPath)) {
     if (Deno.env.get("YJ64_COUNCIL_WORKER_ENABLED") !== "true" ||
         Deno.env.get("YJ64_COUNCIL_ENGINE_ADAPTER") !== "ready") {
       return json({ error: "council_engine_not_ready", message: "Request intake is disabled until the real Council worker and server-side engine adapter are deployed." }, 503);
