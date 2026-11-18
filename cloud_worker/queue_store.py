@@ -123,3 +123,152 @@ class SupabaseQueueStore:
         if not claimed:
             return None
         return claimed[0] if isinstance(claimed, list) else claimed
+
+
+class PostgresQueueStore:
+    """Standard PostgreSQL adapter for the same Council queue contract.
+
+    It intentionally targets the standalone schema in postgres/schema.sql rather
+    than depending on Supabase RPCs, PostgREST, roles, or Edge Functions.
+    """
+
+    def __init__(self, conninfo: str, max_size: int = 12) -> None:
+        if not conninfo:
+            raise ValueError("DATABASE_URL is required for the PostgreSQL queue backend")
+        from psycopg.rows import dict_row
+        from psycopg_pool import ConnectionPool
+
+        self._pool = ConnectionPool(
+            conninfo=conninfo,
+            min_size=1,
+            max_size=max(2, min(24, int(max_size))),
+            kwargs={"row_factory": dict_row},
+            open=True,
+        )
+
+    def close(self) -> None:
+        self._pool.close()
+
+    def _execute_one(self, sql: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
+        with self._pool.connection() as conn:
+            return conn.execute(sql, params).fetchone()
+
+    def load_request(self, request_id: str) -> dict[str, Any]:
+        row = self._execute_one(
+            "SELECT * FROM public.yj64_council_api_requests WHERE request_id = %s",
+            (request_id,),
+        )
+        if row is None:
+            raise LookupError(f"Council request not found: {request_id}")
+        return row
+
+    def is_cancelled(self, request_id: str) -> bool:
+        row = self._execute_one(
+            "SELECT cancel_requested, status FROM public.yj64_council_api_requests "
+            "WHERE request_id = %s",
+            (request_id,),
+        )
+        if row is None:
+            return True
+        return bool(row["cancel_requested"]) or row["status"] == "cancelled"
+
+    def update_progress(self, request_id: str, worker_id: str, progress: dict[str, Any]) -> None:
+        self._execute_one(
+            "UPDATE public.yj64_council_api_requests "
+            "SET progress = %s, updated_at = now() "
+            "WHERE request_id = %s AND worker_id = %s AND status = 'running' RETURNING request_id",
+            (progress, request_id, worker_id),
+        )
+
+    def renew_lease(self, request_id: str, worker_id: str, lease_seconds: int) -> None:
+        self._execute_one(
+            "UPDATE public.yj64_council_api_requests "
+            "SET lease_expires_at = now() + make_interval(secs => %s), updated_at = now() "
+            "WHERE request_id = %s AND worker_id = %s AND status = 'running' RETURNING request_id",
+            (lease_seconds, request_id, worker_id),
+        )
+
+    def mark_cancelled(self, request_id: str, worker_id: str) -> None:
+        self._execute_one(
+            "UPDATE public.yj64_council_api_requests SET status = 'cancelled', "
+            "completed_at = now(), updated_at = now(), lease_expires_at = NULL "
+            "WHERE request_id = %s AND worker_id = %s AND status = 'running' RETURNING request_id",
+            (request_id, worker_id),
+        )
+
+    def mark_completed(self, request_id: str, worker_id: str, result: dict[str, Any]) -> None:
+        self._execute_one(
+            "UPDATE public.yj64_council_api_requests SET status = 'completed', result = %s, "
+            "progress = %s, completed_at = now(), updated_at = now(), lease_expires_at = NULL, "
+            "error_code = NULL, error_message = NULL "
+            "WHERE request_id = %s AND worker_id = %s AND status = 'running' RETURNING request_id",
+            (result, {"phase": "completed"}, request_id, worker_id),
+        )
+
+    def record_event(self, request_id: str, agent_id: str, event_type: str, details: dict[str, Any]) -> None:
+        self._execute_one(
+            "INSERT INTO public.yj64_council_api_events "
+            "(request_id, agent_id, event_type, details) VALUES (%s, %s, %s, %s) RETURNING event_id",
+            (request_id, agent_id, event_type, details),
+        )
+
+    def record_attempt_failure(self, request_id: str, worker_id: str, message: str) -> None:
+        self._execute_one(
+            "UPDATE public.yj64_council_api_requests SET error_code = 'worker_attempt_failed', "
+            "error_message = %s, lease_expires_at = now(), updated_at = now() "
+            "WHERE request_id = %s AND worker_id = %s AND status = 'running' RETURNING request_id",
+            (message[:2000], request_id, worker_id),
+        )
+
+    def fail_exhausted_leases(self) -> None:
+        self._execute_one(
+            "UPDATE public.yj64_council_api_requests SET status = 'failed', "
+            "error_code = 'worker_retries_exhausted', "
+            "error_message = 'Worker lease expired after the maximum number of attempts.', "
+            "completed_at = now(), updated_at = now(), lease_expires_at = NULL "
+            "WHERE status = 'running' AND lease_expires_at < now() "
+            "AND attempts >= max_attempts RETURNING request_id"
+        )
+
+    def publish_heartbeat(self, worker_id: str, status: str, routes: list[str]) -> None:
+        self._execute_one(
+            "INSERT INTO public.yj64_council_api_workers "
+            "(worker_id, status, version, routes, last_seen_at, updated_at) "
+            "VALUES (%s, %s, 'yj64-council-worker/1.0.0', %s, now(), now()) "
+            "ON CONFLICT (worker_id) DO UPDATE SET status = EXCLUDED.status, "
+            "version = EXCLUDED.version, routes = EXCLUDED.routes, "
+            "last_seen_at = now(), updated_at = now() RETURNING worker_id",
+            (worker_id, status, routes),
+        )
+
+    def claim(self, worker_id: str, lease_seconds: int) -> dict[str, Any] | None:
+        return self._execute_one(
+            """
+            WITH candidate AS (
+                SELECT request_id
+                FROM public.yj64_council_api_requests
+                WHERE cancel_requested = false
+                  AND (
+                    status = 'accepted'
+                    OR (
+                      status = 'running'
+                      AND lease_expires_at < now()
+                      AND attempts < max_attempts
+                    )
+                  )
+                ORDER BY created_at
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+            )
+            UPDATE public.yj64_council_api_requests AS request
+            SET status = 'running',
+                worker_id = %s,
+                lease_expires_at = now() + make_interval(secs => %s),
+                attempts = request.attempts + 1,
+                updated_at = now()
+            FROM candidate
+            WHERE request.request_id = candidate.request_id
+            RETURNING request.*
+            """,
+            (worker_id, lease_seconds),
+        )
