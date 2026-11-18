@@ -30,7 +30,10 @@ adb shell dumpsys window > emulator-test-artifacts/window-state.txt
 
 RECEIVED=0
 for attempt in $(seq 1 60); do
-  if adb exec-out run-as org.blackmirror.yj64monitor cat "files/yj64-reports/yj64-report.jsonl" 2>/dev/null | grep -q '"event":"self_diagnostic"'; then
+  REPORT="$(adb exec-out run-as org.blackmirror.yj64monitor cat "files/yj64-reports/yj64-report.jsonl" 2>/dev/null || true)"
+  if echo "$REPORT" | grep -q '"event":"self_diagnostic"' \
+    && echo "$REPORT" | grep -q '"event":"internal_startup"' \
+    && echo "$REPORT" | grep -q '"event":"internal_service_ready"'; then
     RECEIVED=1
     break
   fi
@@ -44,11 +47,13 @@ adb logcat -d -t 5000 | grep -E "AndroidRuntime|Python|python|blackmirror|yj64|F
 cat emulator-test-artifacts/relevant-logcat.txt
 
 if [ "$RECEIVED" -ne 1 ]; then
-  echo "ERROR: Base diagnostic report did not reach Monitor through Content Provider IPC." >&2
+  echo "ERROR: Monitor did not receive the complete Base startup diagnostic sequence through Content Provider IPC." >&2
+  cat emulator-test-artifacts/monitor-report.jsonl >&2
   exit 1
 fi
 
 REPORT="$(cat emulator-test-artifacts/monitor-report.jsonl)"
-echo "$REPORT" | grep -q '"event":"internal_startup"'
-echo "$REPORT" | grep -q '"event":"internal_service_ready"'
-echo "PASS: YJ-64 Base process launched and Monitor received IPC diagnostics."
+echo "$REPORT" | grep -q '"process":"ok"'
+echo "$REPORT" | grep -q '"configuration":"ok"'
+echo "$REPORT" | grep -q '"target_visibility":"visible"'
+echo "PASS: YJ-64 Base process launched and Monitor received self-diagnostic, startup and ready IPC reports."
