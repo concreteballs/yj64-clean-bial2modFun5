@@ -144,6 +144,24 @@ def error(message: str, status: int) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status, headers={"cache-control": "no-store"})
 
 
+async def read_limited_body(request: Request, limit: int) -> bytes | None:
+    declared = request.headers.get("content-length")
+    if declared:
+        try:
+            if int(declared) > limit:
+                return None
+        except ValueError:
+            return None
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > limit:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def authenticate(request: Request, scope: str) -> dict[str, Any] | JSONResponse:
     auth = request.headers.get("authorization", "")
     match = re.fullmatch(r"Bearer ([^\s]{16,4096})", auth)
@@ -231,10 +249,10 @@ async def submit(request: Request):
     if isinstance(agent, JSONResponse):
         return agent
     try:
-        raw = await request.body()
+        raw = await read_limited_body(request, MAX_BODY_BYTES)
     except Exception:
         return error("invalid_json", 400)
-    if len(raw) > MAX_BODY_BYTES:
+    if raw is None:
         return error("payload_too_large", 413)
     try:
         body = json.loads(raw, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
@@ -365,8 +383,8 @@ async def cancel(request_id: str, request: Request):
     if isinstance(agent, JSONResponse):
         return agent
     try:
-        raw = await request.body()
-        if len(raw) > 4096:
+        raw = await read_limited_body(request, 4096)
+        if raw is None:
             return error("payload_too_large", 413)
         body = json.loads(raw, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
     except (ValueError, UnicodeDecodeError):
