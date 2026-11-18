@@ -25,7 +25,7 @@ The worker now uses the `QueueStore` protocol (`cloud_worker/queue_store.py`) wi
 - RPC `yj64_claim_council_api_request`
 - Supabase worker registry tables
 
-The Council engine itself is comparatively portable. The queue/storage adapter and current Edge Function ingress are the provider-specific boundaries. A future self-hosted or non-Supabase deployment must add a tested PostgreSQL implementation and replace the ingress adapter, not the Council engine or public protocol.
+The Council engine itself is comparatively portable. The queue/storage adapter and current Edge Function ingress are the provider-specific boundaries. A future self-hosted or non-Supabase deployment must complete PostgreSQL adapter validation and move/replace the ingress adapter so it writes to the same database, not rewrite the Council engine or public protocol.
 
 ## Free hosting assessment (checked 2026-11-19)
 
@@ -67,7 +67,7 @@ Official Render docs:
 
 1. Keep Council orchestration and provider routing independent from hosting vendor APIs.
 2. Use standard Linux containers, Python 3.11+, HTTP/JSON, environment configuration and PostgreSQL semantics.
-3. Put queue/database operations behind a small storage adapter. Keep the existing Supabase adapter first; add a standard PostgreSQL adapter before claiming Supabase independence.
+3. Keep queue/database operations behind the `QueueStore` contract. Both Supabase and standard PostgreSQL adapters now exist; validate them against the same contract before claiming database portability.
 4. Keep migrations as ordinary SQL wherever possible. Isolate vendor-specific auth and Edge Function behavior behind the ingress adapter.
 5. Persist authoritative task state in PostgreSQL, not container filesystems or ephemeral key-value stores.
 6. Treat local files as disposable cache only. Store durable artifacts in PostgreSQL or an S3-compatible object-storage adapter.
@@ -84,7 +84,7 @@ Official Render docs:
 - `object storage`: optional S3-compatible adapter for large artifacts; not required for the current queue payloads.
 - `reverse proxy/TLS`: provider-neutral Caddy or equivalent when the API is self-hosted.
 
-The initial Oracle VM deployment can run the worker container while the existing Supabase API/database remain in place. This avoids a risky simultaneous migration. The subsequent portability milestone is replacing Supabase-specific queue calls with a PostgreSQL adapter and adding a self-hosted API container.
+The initial Oracle VM deployment can run the worker container while the existing Supabase API/database remain in place. This avoids a risky simultaneous migration. The PostgreSQL worker adapter and standalone schema now exist. The next portability milestone is a self-hosted API container implementing the existing public contract and sharing the same PostgreSQL database with the worker.
 
 ## Current deployment blockers
 
@@ -92,7 +92,7 @@ The initial Oracle VM deployment can run the worker container while the existing
 - Real provider routes and secrets are not yet installed in a host secret manager.
 - No authenticated live provider E2E has been run.
 - The PostgreSQL adapter and standalone schema are implemented, but the current Edge Function still targets Supabase. A complete self-hosted deployment also requires moving/replacing API ingress and validating the end-to-end flow against one shared database.
-- The worker CI proves deterministic adapter behavior and container build, not cloud deployment, provider credentials, billing, uptime or database portability.
+- CI now includes a disposable PostgreSQL service and tests for concurrent claims, expired-lease recovery, cancellation and result persistence. The latest workflow result still needs confirmation; even a passing run does not prove cloud deployment, provider credentials, billing or uptime.
 
 ## Safe activation sequence
 
