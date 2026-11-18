@@ -1,5 +1,6 @@
 import json
 import unittest
+from unittest.mock import patch
 
 from cloud_worker.engine import (
     CouncilConfigurationError,
@@ -25,6 +26,22 @@ class EngineContractTests(unittest.TestCase):
 
     def test_json_parser_accepts_fenced_or_surrounded_object(self):
         self.assertEqual(_parse_json_object('Result: {"verdict":"agree"}'), {"verdict": "agree"})
+
+    def test_session_deadline_is_enforced(self):
+        with patch("cloud_worker.engine.time.monotonic", return_value=101.0):
+            from cloud_worker.engine import _remaining_timeout
+            with self.assertRaises(TimeoutError):
+                _remaining_timeout(0.0, 100)
+
+    def test_server_adapter_passes_injected_provider_config_to_router(self):
+        routes = {"route_1": {"provider": "openai", "model": "x", "api_key": "server-secret", "endpoint": ""},
+                  "route_2": {"provider": "gemini", "model": "y", "api_key": "server-secret-2", "endpoint": ""}}
+        engine = CouncilEngine(routes=routes)
+        with patch("cloud_worker.engine.generate_response", return_value={"response": "ok"}) as call:
+            response = engine._call("route_1", "hello", [{"role": "user", "content": "hello"}], 128, 30)
+        self.assertEqual(response, "ok")
+        self.assertEqual(call.call_args.kwargs["config_override"]["api_key"], "server-secret")
+        self.assertEqual(call.call_args.kwargs["timeout_seconds"], 30)
 
 
     def test_engine_runs_real_council_lifecycle_and_classifies_disagreement(self):
