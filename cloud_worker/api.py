@@ -194,7 +194,7 @@ def record_event(request_id: str, agent_id: str, event_type: str, details: dict[
     db_one(
         "INSERT INTO public.yj64_council_api_events(request_id, agent_id, event_type, details) "
         "VALUES (%s, %s, %s, %s) RETURNING event_id",
-        (request_id, agent_id, event_type, Jsonb(details or {})),
+        (UUID(request_id), agent_id, event_type, Jsonb(details or {})),
     )
 
 
@@ -338,7 +338,7 @@ def parse_request_id(value: str) -> bool:
 def get_owned_request(request_id: str, agent_id: str) -> dict[str, Any] | None:
     return db_one(
         "SELECT * FROM public.yj64_council_api_requests WHERE request_id = %s AND agent_id = %s",
-        (request_id, agent_id),
+        (UUID(request_id), agent_id),
     )
 
 
@@ -412,7 +412,7 @@ async def cancel(request_id: str, request: Request):
     current = db_one(
         "SELECT request_id, status FROM public.yj64_council_api_requests "
         "WHERE request_id = %s AND agent_id = %s",
-        (request_id, agent["agent_id"]),
+        (UUID(request_id), agent["agent_id"]),
     )
     if not current:
         return error("not_found", 404)
@@ -426,14 +426,14 @@ async def cancel(request_id: str, request: Request):
         WHERE request_id = %s AND agent_id = %s AND status IN ('accepted', 'running')
         RETURNING status
         """,
-        (request_id, agent["agent_id"]),
+        (UUID(request_id), agent["agent_id"]),
     )
     if updated:
         record_event(request_id, agent["agent_id"], "request_cancelled", {})
         return {"protocol_version": VERSION, "request_id": request_id, "status": "cancelled"}
     after = db_one(
         "SELECT status FROM public.yj64_council_api_requests WHERE request_id = %s AND agent_id = %s",
-        (request_id, agent["agent_id"]),
+        (UUID(request_id), agent["agent_id"]),
     )
     if not after or after["status"] not in ("completed", "blocked", "failed", "cancelled"):
         return error("cancel_state_race_retry", 409)
