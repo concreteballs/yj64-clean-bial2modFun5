@@ -587,6 +587,9 @@ def generate_response(
                     attempt=service_unavailable_attempt,
                     wait_seconds=wait_seconds, error=message[:500],
                 )
+                wait_seconds = min(wait_seconds, max(0, deadline - time.monotonic()))
+                if wait_seconds <= 0:
+                    raise TimeoutError("Provider retry deadline exceeded") from exc
                 time.sleep(wait_seconds)
                 continue
             _report(
