@@ -30,7 +30,7 @@ services:
       - .env
     environment:
       YJ64_QUEUE_BACKEND: postgres
-      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      DATABASE_URL: postgresql://${YJ64_POSTGRES_USER:-yj64_runtime}:${YJ64_POSTGRES_PASSWORD:?Set YJ64_POSTGRES_PASSWORD in .env}@postgres:5432/${YJ64_POSTGRES_DB:-yj64}
     depends_on:
       postgres:
         condition: service_healthy
