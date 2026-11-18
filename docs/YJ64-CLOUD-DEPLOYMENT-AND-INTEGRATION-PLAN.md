@@ -933,3 +933,8 @@ OpenAPI сверена с read-only источниками Gateway:
 | 6. Ограниченный rollout | **Не начат** — API health доступен, но readiness gate закрыт. |
 
 **Граница готовности:** активная Edge Function и созданные таблицы не означают, что консилиум уже выполняется в облаке. До завершения worker и server-side engine adapter интеграция остаётся закрытой для submit.
+
+
+### Уточнение транспортного заголовка Supabase
+
+Supabase API Gateway требует публичный project publishable key в заголовке `apikey`, даже когда встроенная JWT-проверка Edge Function отключена. Это не machine credential и не даёт прав на данные: RLS и отсутствие клиентских GRANT остаются обязательными. Заголовок добавлен в OpenAPI. Gateway-клиент должен отправлять оба заголовка: `apikey` (публичный publishable key) и `Authorization: Bearer` (секретный machine token). Текущий Gateway-клиент ранее был проверен только на Bearer token; пока он не отправляет `apikey`, прямой вызов Supabase Edge Function от него не подтверждён.
