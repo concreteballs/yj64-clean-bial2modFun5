@@ -175,7 +175,7 @@ class PostgresQueueStore:
         row = self._execute_one(
             "SELECT cancel_requested, status FROM public.yj64_council_api_requests "
             "WHERE request_id = %s",
-            (request_id,),
+            (_uuid(request_id),),
         )
         if row is None:
             return True
@@ -202,7 +202,7 @@ class PostgresQueueStore:
             "UPDATE public.yj64_council_api_requests SET status = 'cancelled', "
             "completed_at = now(), updated_at = now(), lease_expires_at = NULL "
             "WHERE request_id = %s AND worker_id = %s AND status = 'running' RETURNING request_id",
-            (request_id, worker_id),
+            (_uuid(request_id), worker_id),
         )
 
     def mark_completed(self, request_id: str, worker_id: str, result: dict[str, Any]) -> None:
