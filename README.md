@@ -44,3 +44,7 @@ upload in the monitor UI is not the diagnostic IPC transport.
 
 
 Stage 2 build trigger: embedded-agent base integration.
+
+## Server deployment
+
+This repository currently builds an Android client and Android diagnostic Monitor. These APKs are not the server deployment target. The Linux server migration assessment, Android-specific dependencies, proposed server split, free-hosting assessment, and migration sequence are documented in [docs/server-deployment-readiness.md](docs/server-deployment-readiness.md).
