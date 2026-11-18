@@ -60,5 +60,15 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_cloud_queue_store.py' -v
       - name: Run PostgreSQL queue integration tests
         run: python -m unittest discover -s tests -p 'test_cloud_postgres_queue_store.py' -v
-      - name: Build worker container
-        run: docker build --pull -f cloud_worker/Dockerfile -t yj64-council-worker:test .
+      - name: Set up QEMU for ARM64 image build
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build and validate AMD64 + ARM64 OCI image
+        run: >-
+          docker buildx build --pull
+          --platform linux/amd64,linux/arm64
+          -f cloud_worker/Dockerfile
+          -t yj64-council-worker:test
+          --output type=oci,dest=/tmp/yj64-council-worker.oci.tar
+          .
