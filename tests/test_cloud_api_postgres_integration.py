@@ -150,10 +150,11 @@ class PortableCouncilApiPostgresTests(unittest.TestCase):
 
     def test_submit_gate_remains_closed_without_explicit_enablement(self):
         os.environ["YJ64_COUNCIL_WORKER_ENABLED"] = "false"
+        idem = "idem-gate-" + uuid.uuid4().hex
         response = self.client.post(
             api.REQUEST_PATH,
-            json=self.body("idem-gate-" + uuid.uuid4().hex),
-            headers=self.headers("idem-gate-" + uuid.uuid4().hex),
+            json=self.body(idem),
+            headers=self.headers(idem),
         )
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"], "council_engine_not_ready")
