@@ -1,6 +1,6 @@
 # ADR-001: Cloud runtime and durable execution for the external Council API
 
-- **Status:** Proposed; deployment target requires an operational smoke test before acceptance.
+- **Status:** Partially accepted — Supabase Edge Function API transport deployed; worker runtime and engine adapter remain Proposed.
 - **Date:** 2026-11-18
 - **Scope:** `concreteballs/yj64-clean-bial2modFun5`, branch `main`.
 - **Related contract:** [OpenAPI](./openapi/council-api-v1.yaml), protocol `yj64.council-api.v1`.
@@ -67,3 +67,20 @@ If any condition fails, provision a separately approved database/queue. Do not c
 ## Consequences
 
 This design makes the API independently deployable and keeps the Android app as a lightweight client. It introduces cloud operations (database, queue, worker, secrets, monitoring) that must be tested and documented. This ADR is a proposal, not evidence that any endpoint or Council worker is already deployed.
+
+
+## Deployment findings — 2026-11-18
+
+The existing Supabase project `YJ64-Autonomous-Core` was verified as `ACTIVE_HEALTHY` in `eu-central-1` with PostgreSQL 17.12. It already has a private Storage bucket `yj64-private-artifacts`. Existing Core queue/checkpoint tables are active and contain data, so the application API uses isolated `yj64_council_api_*` tables rather than modifying or claiming the shared Core queue.
+
+The API transport is now deployed as Supabase Edge Function `council-api`, version 2, at:
+
+`https://ggambesixwejgbjwtnhw.supabase.co/functions/v1/council-api`
+
+The function implements the four Gateway operations, custom machine Bearer authentication using stored SHA-256 token hashes, scopes, owner-scoped reads, idempotency, request persistence, cancellation and result-shape checks. The database tables have RLS enabled, no client policies, no `anon`/`authenticated` SELECT grants, and server-role access only. The audit sequence is also restricted to server role.
+
+The submit route is deliberately feature-gated. Until a real worker and server-side Council adapter are deployed, it returns `503 council_engine_not_ready`. The public health response reports the API and database availability but explicitly reports `worker: not_deployed`, `council_engine: not_connected`, and `ready_for_requests: false`. No machine token or provider secret has been provisioned.
+
+The Edge Function is the selected API ingress. A separate long-running worker runtime is still undecided; it must not be assumed to be the same short-lived Edge Function. The existing `yj64-private-artifacts` bucket is private and can be used for result artifacts after access policy and object-key ownership are defined. The `pgmq` and `pg_cron` extensions are available but not installed; no dependency on them is assumed.
+
+The current `llm_api.py` reads provider configuration from the local app `user_data_dir`. It cannot be invoked as a secure cloud Council engine without a platform-neutral adapter and separately provisioned server credentials. Therefore this ADR does not claim full Council execution readiness.
