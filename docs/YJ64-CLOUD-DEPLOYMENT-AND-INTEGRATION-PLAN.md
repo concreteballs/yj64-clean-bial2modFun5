@@ -978,3 +978,42 @@ https://github.com/concreteballs/yj64-clean-bial2modFun5/actions/runs/4439273469
 **Важная интеграционная зависимость:** Supabase API Gateway требует публичный `apikey` header с publishable key. Gateway должен передавать его дополнительно к секретному `Authorization: Bearer`. Это изменение должно быть внесено в Gateway в его отдельном рабочем цикле; репозиторий Engineering Core здесь не менялся.
 
 Итоговый статус: транспорт и защитный readiness gate развёрнуты и проверены. Submit остаётся намеренно закрытым. Реальный worker, server-side Council engine adapter, provider secrets, machine agent registration и live E2E остаются незавершёнными.
+
+
+---
+
+## 8.3.14. Серверный движок Council и отдельный worker — 2026-11-18
+
+### Реализовано в репозитории
+
+- `llm_api.py` расширен необязательным `config_override`: облачный процесс передаёт серверную конфигурацию маршрута, Android по умолчанию продолжает читать собственный локальный router config. Общий provider router остаётся единственной реализацией HTTP-вызовов к моделям.
+- Добавлен `cloud_worker/engine.py`: независимые позиции участников, раунд(ы) критики, финальная структурированная позиция каждого участника, вычисление outcome из явно заявленных verdict и проверка публичной структуры результата.
+- Добавлен `cloud_worker/worker.py`: получение заданий через атомарную DB claim-функцию, lease renewal, heartbeat, проверка отмены, запись progress/result, ограниченные повторные попытки и terminal failure после исчерпания попыток.
+- Добавлены Dockerfile, pinned Python dependencies и `cloud_worker/README.md` с форматом secret config и порядком безопасного включения.
+- Добавлены unit tests и отдельный GitHub Actions workflow, который компилирует Python, запускает тесты и собирает контейнер.
+- Добавлена таблица `yj64_council_api_workers`, закрытая RLS и GRANT для клиентских ролей; worker heartbeat используется для реальной проверки готовности.
+- Edge API version 6 теперь считает worker готовым только при heartbeat моложе 120 секунд. Submit требует одновременно серверные флаги адаптера/worker и активный heartbeat.
+
+### Ограничения текущего движка
+
+- Это реальный много-модельный цикл на существующем provider router, но пока не независимая проверка истинности выводов внешними источниками или физическими симуляторами.
+- Weighted voting не реализован; при включённом флаге возвращается только агрегированное число verdict, а weighted_enabled остаётся false и ограничение явно записывается.
+- Финальный JSON каждого участника валидируется; невалидный ответ завершает попытку ошибкой и может быть повторён по lease policy.
+- Реальные provider secrets не добавлялись в репозиторий или Supabase. Их необходимо задать в secret manager выбранного worker host.
+
+### Проверки
+
+- Council API smoke workflow #10: success — health, обязательная версия протокола, отказ неверного machine token, submit gate, result/cancel auth checks.
+- Council worker tests workflow #2: success — компиляция, unit tests и Docker build.
+- Дополнительный worker workflow #3 запущен после добавления deployment README; итог проверяется отдельно.
+- Проверено: worker registry table имеет RLS; `anon` и `authenticated` не имеют SELECT.
+
+### Что ещё нельзя включать
+
+- Worker container пока не развёрнут на внешнем постоянном runtime.
+- Provider route secrets не установлены.
+- `YJ64_COUNCIL_WORKER_ENABLED` и `YJ64_COUNCIL_ENGINE_ADAPTER` остаются выключенными; API submit gate остаётся закрытым.
+- Нельзя выполнять live Gateway → Council E2E, пока worker host не выбран и реальные provider credentials не установлены.
+- Перед открытием submit обязательны контролируемый live test, отмена во время работающего provider call, lease recovery после принудительного завершения контейнера и проверка сохранённого результата.
+
+**Следующий этап:** выбрать/подключить постоянный контейнерный runtime для worker, задать секреты двух или более реальных model routes, развернуть worker, проверить heartbeat и провести ограниченный live test. До этого API остаётся безопасно закрытым.
