@@ -5,7 +5,7 @@ info:
   description: |
     Supabase Edge Function ingress additionally requires the project's public publishable key in the `apikey` header. This is a public project identifier, not the machine credential. The machine credential remains in Authorization: Bearer.
     Application-side API contract aligned to Engineering Core's
-    yj64.council-api.v1 schema. These routes are proposed until implemented.
+    yj64.council-api.v1 schema. The routes are implemented by the deployed Edge Function; request intake remains gated until the real worker and Council engine adapter are ready.
 servers:
   - url: https://ggambesixwejgbjwtnhw.supabase.co/functions/v1/council-api
     description: Deployed Supabase Edge Function ingress. The function path is part of the base URL.
