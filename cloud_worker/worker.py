@@ -7,7 +7,6 @@ import os
 import signal
 import socket
 import threading
-import time
 import traceback
 import uuid
 from typing import Any
@@ -28,7 +27,7 @@ runtime_routes: list[str] = []
 
 
 def build_queue_store() -> QueueStore:
-    """Select the compatibility adapter until another adapter is explicitly configured."""
+    """Create the selected queue adapter from runtime configuration."""
     backend = os.environ.get("YJ64_QUEUE_BACKEND", "supabase").strip().lower()
     if backend == "supabase":
         url = os.environ.get("SUPABASE_URL", "")
