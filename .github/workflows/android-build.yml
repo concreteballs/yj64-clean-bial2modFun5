@@ -141,7 +141,7 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
           script: |
-            set -euo pipefail
+            set -eu
             adb wait-for-device
             mkdir -p emulator-test-artifacts
             adb install -r "monitor-app/app/build/outputs/apk/debug/app-debug.apk"
