@@ -18,14 +18,14 @@ The Android Base and Monitor APKs are not server deployment artifacts. The Andro
 
 ## Current coupling that must be isolated before moving off Supabase
 
-The worker currently calls Supabase-specific APIs directly:
+The worker now uses the `QueueStore` protocol (`cloud_worker/queue_store.py`) and a `SupabaseQueueStore` compatibility implementation. That adapter still uses:
 
 - `supabase.create_client()`
 - PostgREST table operations
 - RPC `yj64_claim_council_api_request`
 - Supabase worker registry tables
 
-The Council engine itself is comparatively portable. The worker's queue/storage adapter and the current Edge Function ingress are the provider-specific boundary. A future self-hosted or non-Supabase deployment must replace those adapters, not the Council engine or public protocol.
+The Council engine itself is comparatively portable. The queue/storage adapter and current Edge Function ingress are the provider-specific boundaries. A future self-hosted or non-Supabase deployment must add a tested PostgreSQL implementation and replace the ingress adapter, not the Council engine or public protocol.
 
 ## Free hosting assessment (checked 2026-11-19)
 
@@ -91,7 +91,7 @@ The initial Oracle VM deployment can run the worker container while the existing
 - No external worker host has been provisioned.
 - Real provider routes and secrets are not yet installed in a host secret manager.
 - No authenticated live provider E2E has been run.
-- The worker still uses Supabase-specific PostgREST/RPC calls; a self-hosted PostgreSQL deployment is not yet plug-compatible.
+- The worker has a queue-store abstraction, but only its Supabase implementation exists; a self-hosted PostgreSQL deployment is not yet plug-compatible.
 - The worker CI proves deterministic adapter behavior and container build, not cloud deployment, provider credentials, billing, uptime or database portability.
 
 ## Safe activation sequence
