@@ -73,7 +73,7 @@ This design makes the API independently deployable and keeps the Android app as 
 
 The existing Supabase project `YJ64-Autonomous-Core` was verified as `ACTIVE_HEALTHY` in `eu-central-1` with PostgreSQL 17.12. It already has a private Storage bucket `yj64-private-artifacts`. Existing Core queue/checkpoint tables are active and contain data, so the application API uses isolated `yj64_council_api_*` tables rather than modifying or claiming the shared Core queue.
 
-The API transport is now deployed as Supabase Edge Function `council-api`, version 2, at:
+The API transport is now deployed as Supabase Edge Function `council-api`, version 5, at:
 
 `https://ggambesixwejgbjwtnhw.supabase.co/functions/v1/council-api`
 
