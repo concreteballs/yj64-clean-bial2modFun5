@@ -6,14 +6,33 @@ info:
     Application-side API contract aligned to Engineering Core's
     yj64.council-api.v1 schema. These routes are proposed until implemented.
 servers:
-  - url: https://{host}
-    description: Replace with the verified YJ-64 API deployment origin.
-    variables:
-      host:
-        default: council-api.example.invalid
+  - url: https://ggambesixwejgbjwtnhw.supabase.co/functions/v1/council-api
+    description: Deployed Supabase Edge Function ingress. The function path is part of the base URL.
 security:
   - MachineBearer: []
 paths:
+  /health:
+    get:
+      operationId: getCouncilApiHealth
+      summary: Check API and database health without revealing secrets
+      security: []
+      responses:
+        '200':
+          description: API and database are reachable; readiness fields may still be false.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, api, database, council_engine, worker, ready_for_requests]
+                properties:
+                  status: {type: string}
+                  api: {type: string}
+                  database: {type: string}
+                  council_engine: {type: string}
+                  worker: {type: string}
+                  ready_for_requests: {type: boolean}
+        '503':
+          description: API configuration or database unavailable.
   /api/v1/external-agents/council/requests:
     post:
       operationId: submitCouncilRequest
@@ -50,6 +69,8 @@ paths:
           description: Request payload exceeds configured limit.
         '429':
           $ref: '#/components/responses/RateLimited'
+        '503':
+          description: Real Council worker or server-side engine adapter is not ready; no request was accepted.
   /api/v1/external-agents/council/requests/{request_id}:
     get:
       operationId: getCouncilRequestStatus
