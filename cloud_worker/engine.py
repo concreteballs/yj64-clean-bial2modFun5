@@ -237,7 +237,7 @@ class CouncilEngine:
             outcome = "insufficient_evidence"
         elif "disagree" in verdicts:
             outcome = "unresolved_disagreement"
-        elif "conditional" in verdicts or "insufficient_evidence" in verdicts:
+        elif "conditional" in verdicts or "insufficient_evidence" in verdicts or unresolved:
             outcome = "qualified_consensus"
         else:
             outcome = "consensus"
