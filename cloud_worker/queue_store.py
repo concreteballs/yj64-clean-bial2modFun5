@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
+from uuid import UUID
 
 
 class QueueStore(Protocol):
@@ -27,6 +28,10 @@ class QueueStore(Protocol):
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _uuid(value: str | UUID) -> UUID:
+    return value if isinstance(value, UUID) else UUID(str(value))
 
 
 class SupabaseQueueStore:
@@ -158,7 +163,7 @@ class PostgresQueueStore:
     def load_request(self, request_id: str) -> dict[str, Any]:
         row = self._execute_one(
             "SELECT * FROM public.yj64_council_api_requests WHERE request_id = %s",
-            (request_id,),
+            (_uuid(request_id),),
         )
         if row is None:
             raise LookupError(f"Council request not found: {request_id}")
@@ -181,7 +186,7 @@ class PostgresQueueStore:
             "UPDATE public.yj64_council_api_requests "
             "SET progress = %s, updated_at = now() "
             "WHERE request_id = %s AND worker_id = %s AND status = 'running' RETURNING request_id",
-            (self._jsonb(progress), request_id, worker_id),
+            (self._jsonb(progress), _uuid(request_id), worker_id),
         )
 
     def renew_lease(self, request_id: str, worker_id: str, lease_seconds: int) -> None:
@@ -189,7 +194,7 @@ class PostgresQueueStore:
             "UPDATE public.yj64_council_api_requests "
             "SET lease_expires_at = now() + make_interval(secs => %s), updated_at = now() "
             "WHERE request_id = %s AND worker_id = %s AND status = 'running' RETURNING request_id",
-            (lease_seconds, request_id, worker_id),
+            (lease_seconds, _uuid(request_id), worker_id),
         )
 
     def mark_cancelled(self, request_id: str, worker_id: str) -> None:
@@ -206,14 +211,14 @@ class PostgresQueueStore:
             "progress = %s, completed_at = now(), updated_at = now(), lease_expires_at = NULL, "
             "error_code = NULL, error_message = NULL "
             "WHERE request_id = %s AND worker_id = %s AND status = 'running' RETURNING request_id",
-            (self._jsonb(result), self._jsonb({"phase": "completed"}), request_id, worker_id),
+            (self._jsonb(result), self._jsonb({"phase": "completed"}), _uuid(request_id), worker_id),
         )
 
     def record_event(self, request_id: str, agent_id: str, event_type: str, details: dict[str, Any]) -> None:
         self._execute_one(
             "INSERT INTO public.yj64_council_api_events "
             "(request_id, agent_id, event_type, details) VALUES (%s, %s, %s, %s) RETURNING event_id",
-            (request_id, agent_id, event_type, self._jsonb(details)),
+            (_uuid(request_id), agent_id, event_type, self._jsonb(details)),
         )
 
     def record_attempt_failure(self, request_id: str, worker_id: str, message: str) -> None:
@@ -221,7 +226,7 @@ class PostgresQueueStore:
             "UPDATE public.yj64_council_api_requests SET error_code = 'worker_attempt_failed', "
             "error_message = %s, lease_expires_at = now(), updated_at = now() "
             "WHERE request_id = %s AND worker_id = %s AND status = 'running' RETURNING request_id",
-            (message[:2000], request_id, worker_id),
+            (message[:2000], _uuid(request_id), worker_id),
         )
 
     def fail_exhausted_leases(self) -> None:
