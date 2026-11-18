@@ -544,12 +544,16 @@ def generate_response(
         operation_id=operation, route_id=selected_route,
         provider=provider, model=model, api_method=api_method,
     )
-    # Retry the same participant request after transient failures; never fall back silently.
+    # A single participant call has a hard deadline, including retry waits.
+    deadline = time.monotonic() + max(1, min(86400, int(timeout_seconds)))
     rate_attempt = 0
     service_unavailable_attempt = 0
     while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Provider request deadline exceeded")
         try:
-            data = _request("POST", url, headers, timeout=max(5, min(86400, int(timeout_seconds))), payload=payload)
+            data = _request("POST", url, headers, timeout=max(1, remaining), payload=payload)
             break
         except Exception as exc:
             message = str(exc)
@@ -568,6 +572,9 @@ def generate_response(
                     provider=provider, model=model, attempt=rate_attempt,
                     wait_seconds=wait_seconds, error=message[:500],
                 )
+                wait_seconds = min(wait_seconds, max(0, deadline - time.monotonic()))
+                if wait_seconds <= 0:
+                    raise TimeoutError("Provider retry deadline exceeded") from exc
                 time.sleep(wait_seconds)
                 continue
             if unavailable and service_unavailable_attempt < 1:
