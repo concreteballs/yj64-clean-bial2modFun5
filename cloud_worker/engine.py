@@ -69,6 +69,13 @@ def _bounded_strings(value: Any, limit: int = 40) -> list[str]:
     return [str(item).strip()[:2048] for item in value[:limit] if str(item).strip()]
 
 
+def _remaining_timeout(started_at: float, total_seconds: int) -> int:
+    remaining = int(total_seconds - (time.monotonic() - started_at))
+    if remaining <= 0:
+        raise TimeoutError("Council session timeout exceeded")
+    return remaining
+
+
 class CouncilEngine:
     def __init__(
         self,
@@ -148,16 +155,18 @@ class CouncilEngine:
                 "Give your independent initial position. Separate facts, inferences and hypotheses. "
                 "Identify assumptions, evidence gaps and the strongest reason your position could be wrong."
             )}]
-            positions[route] = self._call(route, prompt, history, max_tokens, timeout_seconds)
+            positions[route] = self._call(
+                route, prompt, history, max_tokens,
+                _remaining_timeout(started_at, timeout_seconds),
+            )
             self._emit("independent_positions", participant=route, completed=index, total=len(participants))
 
-        critique_rounds = max(1, min(max_rounds, 3))
+        critique_rounds = max(1, min(max_rounds, 10))
         for round_no in range(1, critique_rounds + 1):
             for route in participants:
                 if is_cancelled():
                     raise CouncilCancelled("Cancellation requested")
-                if time.monotonic() - started_at >= timeout_seconds:
-                    raise TimeoutError("Council session timeout exceeded")
+                remaining = _remaining_timeout(started_at, timeout_seconds)
                 other_views = {name: value for name, value in positions.items() if name != route}
                 critique_prompt = (
                     f"Critique round {round_no} of {critique_rounds}. Task: {title}\n{prompt}\n\n"
@@ -169,7 +178,7 @@ class CouncilEngine:
                 critique = self._call(
                     route, critique_prompt,
                     [{"role": "user", "content": critique_prompt}],
-                    max_tokens, timeout_seconds,
+                    max_tokens, remaining,
                 )
                 critiques[route].append(critique)
                 self._emit("critique", participant=route, round=round_no)
@@ -194,7 +203,12 @@ class CouncilEngine:
                 f"Requester evidence references: {json.dumps(refs, ensure_ascii=False)}\n"
                 f"{schema_instruction}"
             )
-            raw = self._call(route, final_prompt, [{"role": "user", "content": final_prompt}], max_tokens, min(timeout_seconds, max(5, int(timeout_seconds - (time.monotonic() - started_at)))))
+            remaining = _remaining_timeout(started_at, timeout_seconds)
+            raw = self._call(
+                route, final_prompt,
+                [{"role": "user", "content": final_prompt}],
+                max_tokens, remaining,
+            )
             try:
                 parsed = _parse_json_object(raw)
             except ValueError as exc:
