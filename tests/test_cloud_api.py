@@ -39,6 +39,11 @@ class PortableCouncilApiValidationTests(unittest.TestCase):
         body["limits"]["max_rounds"] = 11
         self.assertEqual(validate_request(body), "invalid_max_rounds")
 
+    def test_rejects_boolean_for_integer_critique_limit(self):
+        body = valid_body()
+        body["limits"]["minimum_critique_rounds"] = True
+        self.assertEqual(validate_request(body), "invalid_critique_limits")
+
     def test_rejects_invalid_context_and_missing_evidence_array(self):
         body = valid_body()
         body["task"]["context"] = []
