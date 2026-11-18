@@ -51,3 +51,41 @@ jobs:
             "$API_BASE/api/v1/external-agents/council/requests/00000000-0000-4000-8000-000000000001")"
           test "$code" = "401"
           jq -e '.error == "unauthorized" or .error == "unauthorized_or_scope_missing"' /tmp/auth.json
+      - name: Verify Council submissions stay disabled without the real engine
+        env:
+          API_BASE: https://ggambesixwejgbjwtnhw.supabase.co/functions/v1/council-api
+        run: |
+          set -euo pipefail
+          cat > /tmp/request.json <<'JSON'
+          {
+            "protocol_version": "yj64.council-api.v1",
+            "agent_id": "smoke-test-agent",
+            "correlation_id": "smoke-test-correlation",
+            "idempotency_key": "smoke-test-idempotency-0001",
+            "mode": "consensus",
+            "task": {
+              "title": "Smoke test",
+              "prompt": "This request must not be accepted.",
+              "context": {},
+              "evidence_refs": []
+            },
+            "limits": {
+              "max_rounds": 2,
+              "timeout_seconds": 60,
+              "max_output_tokens": 512,
+              "minimum_critique_rounds": 1,
+              "allow_early_stop": true
+            },
+            "voting": {"enabled": false, "weighted": false}
+          }
+          JSON
+          code="$(curl --silent --output /tmp/gate.json --write-out '%{http_code}' \
+            -X POST \
+            -H "apikey: $SUPABASE_PUBLISHABLE_KEY" \
+            -H 'X-YJ64-Protocol-Version: yj64.council-api.v1' \
+            -H 'Idempotency-Key: smoke-test-idempotency-0001' \
+            -H 'Content-Type: application/json' \
+            --data-binary @/tmp/request.json \
+            "$API_BASE/api/v1/external-agents/council/requests")"
+          test "$code" = "503"
+          jq -e '.error == "council_engine_not_ready"' /tmp/gate.json
