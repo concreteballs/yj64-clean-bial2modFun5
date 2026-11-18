@@ -24,7 +24,7 @@ Re-check official limits before creating an instance:
 
 ## PostgreSQL preparation
 
-The Compose stack includes PostgreSQL 16 with a persistent named volume. On the first database initialization, Docker mounts `cloud_worker/postgres/schema.sql` into the official PostgreSQL initialization directory and creates the schema automatically. PostgreSQL is not published on a host port; only the API's loopback port is exposed.
+The Compose stack includes PostgreSQL 16 with a persistent named volume. On first initialization, the database container creates a non-login schema owner, a separate restricted `yj64_runtime` role, applies `00-runtime-role.sql`, `schema.sql` and `02-runtime-grants.sql` in order, and grants the API/worker only the table and sequence privileges they need. The owner password is used only by the database container; the runtime password is used by API and worker. PostgreSQL is not published on a host port; only the API's loopback port is exposed.
 
 Set a URL-safe random password (hex characters avoid connection-string escaping problems):
 
@@ -32,7 +32,7 @@ Set a URL-safe random password (hex characters avoid connection-string escaping 
 openssl rand -hex 32
 ```
 
-Put the generated value in `YJ64_POSTGRES_PASSWORD` in `.env`. Compose constructs the internal `DATABASE_URL` for both API and worker using the private service name `postgres`.
+Generate two different values. Put one in `YJ64_POSTGRES_OWNER_PASSWORD` and the other in `YJ64_POSTGRES_PASSWORD` in `.env`. Compose constructs the internal `DATABASE_URL` for both API and worker using the restricted runtime role and private service name `postgres`.
 
 For an existing or externally managed PostgreSQL database, apply `cloud_worker/postgres/schema.sql` manually before starting API/worker and adjust the Compose `DATABASE_URL` environment expression for that database. Keep API and worker pointed at the exact same database.
 
@@ -47,7 +47,7 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-Edit `.env` with the PostgreSQL connection string and at least two real provider routes. The example contains placeholders only. Keep these initial gate values unchanged:
+Edit `.env` with the two generated database passwords and at least two real provider routes. The example contains placeholders only. The Compose file builds the internal database connection string; do not add a public database port. Keep these initial gate values unchanged:
 
 ```dotenv
 YJ64_COUNCIL_ENGINE_ADAPTER=not_ready
@@ -76,7 +76,7 @@ TOKEN="$(openssl rand -hex 32)"
 printf '%s' "$TOKEN" | sha256sum
 ```
 
-Insert the resulting 64-character hash using an owner-only SQL session. Example:
+Insert the resulting 64-character hash using the runtime database role from the server: `docker compose exec -T postgres psql -U yj64_runtime -d yj64`. Example:
 
 ```sql
 INSERT INTO public.yj64_council_api_agents (agent_id, token_hash, scopes, enabled)
