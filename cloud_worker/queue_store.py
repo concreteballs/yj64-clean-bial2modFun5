@@ -136,7 +136,9 @@ class PostgresQueueStore:
         if not conninfo:
             raise ValueError("DATABASE_URL is required for the PostgreSQL queue backend")
         from psycopg.rows import dict_row
+        from psycopg.types.json import Jsonb
         from psycopg_pool import ConnectionPool
+        self._jsonb = Jsonb
 
         self._pool = ConnectionPool(
             conninfo=conninfo,
@@ -177,7 +179,7 @@ class PostgresQueueStore:
             "UPDATE public.yj64_council_api_requests "
             "SET progress = %s, updated_at = now() "
             "WHERE request_id = %s AND worker_id = %s AND status = 'running' RETURNING request_id",
-            (progress, request_id, worker_id),
+            (self._jsonb(progress), request_id, worker_id),
         )
 
     def renew_lease(self, request_id: str, worker_id: str, lease_seconds: int) -> None:
@@ -202,14 +204,14 @@ class PostgresQueueStore:
             "progress = %s, completed_at = now(), updated_at = now(), lease_expires_at = NULL, "
             "error_code = NULL, error_message = NULL "
             "WHERE request_id = %s AND worker_id = %s AND status = 'running' RETURNING request_id",
-            (result, {"phase": "completed"}, request_id, worker_id),
+            (self._jsonb(result), self._jsonb({"phase": "completed"}), request_id, worker_id),
         )
 
     def record_event(self, request_id: str, agent_id: str, event_type: str, details: dict[str, Any]) -> None:
         self._execute_one(
             "INSERT INTO public.yj64_council_api_events "
             "(request_id, agent_id, event_type, details) VALUES (%s, %s, %s, %s) RETURNING event_id",
-            (request_id, agent_id, event_type, details),
+            (request_id, agent_id, event_type, self._jsonb(details)),
         )
 
     def record_attempt_failure(self, request_id: str, worker_id: str, message: str) -> None:
