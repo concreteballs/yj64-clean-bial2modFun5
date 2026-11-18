@@ -12,6 +12,9 @@ on:
 permissions:
   contents: read
 
+env:
+  SUPABASE_PUBLISHABLE_KEY: sb_publishable_rR7g4vyqvpgjhJjSMoYppA_yr59k8Yi
+
 jobs:
   smoke:
     runs-on: ubuntu-latest
