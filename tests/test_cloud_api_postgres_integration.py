@@ -11,8 +11,9 @@ import psycopg
 from fastapi.testclient import TestClient
 
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
-if TEST_DATABASE_URL:
-    os.environ["DATABASE_URL"] = TEST_DATABASE_URL
+API_DATABASE_URL = os.environ.get("RUNTIME_DATABASE_URL", TEST_DATABASE_URL)
+if API_DATABASE_URL:
+    os.environ["DATABASE_URL"] = API_DATABASE_URL
 
 from cloud_worker import api  # noqa: E402
 
