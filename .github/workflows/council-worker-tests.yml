@@ -2,6 +2,12 @@ name: Council worker tests
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - 'cloud_worker/**'
+      - 'llm_api.py'
+      - 'tests/test_cloud_council_engine.py'
+      - '.github/workflows/council-worker-tests.yml'
   push:
     branches: [main]
     paths:
@@ -31,4 +37,4 @@ jobs:
       - name: Run cloud Council engine tests
         run: python -m unittest discover -s tests -p 'test_cloud_council_engine.py' -v
       - name: Build worker container
-        run: docker build -f cloud_worker/Dockerfile -t yj64-council-worker:test .
+        run: docker build --pull -f cloud_worker/Dockerfile -t yj64-council-worker:test .
