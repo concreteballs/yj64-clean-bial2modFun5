@@ -84,3 +84,8 @@ The submit route is deliberately feature-gated. Until a real worker and server-s
 The Edge Function is the selected API ingress. A separate long-running worker runtime is still undecided; it must not be assumed to be the same short-lived Edge Function. The existing `yj64-private-artifacts` bucket is private and can be used for result artifacts after access policy and object-key ownership are defined. The `pgmq` and `pg_cron` extensions are available but not installed; no dependency on them is assumed.
 
 The current `llm_api.py` reads provider configuration from the local app `user_data_dir`. It cannot be invoked as a secure cloud Council engine without a platform-neutral adapter and separately provisioned server credentials. Therefore this ADR does not claim full Council execution readiness.
+
+
+## Smoke-test evidence
+
+GitHub Actions `Council API smoke test` run #8 passed against deployed Edge Function v5. It verified API/database health, mandatory protocol header, rejection of invalid machine credentials, and the submit readiness gate returning `503 council_engine_not_ready`. This confirms the transport/security gate only; it does not prove real Council execution or Gateway end-to-end integration.
