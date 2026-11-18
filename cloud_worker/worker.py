@@ -134,6 +134,16 @@ def process(row: dict[str, Any], engine: CouncilEngine) -> None:
         heartbeat_thread.join(timeout=2)
 
 
+def fail_exhausted_leases() -> None:
+    # Do not leave tasks permanently in running after their final crashed attempt.
+    now = utc_now()
+    db.table("yj64_council_api_requests").update({
+        "status": "failed", "error_code": "worker_retries_exhausted",
+        "error_message": "Worker lease expired after the maximum number of attempts.",
+        "completed_at": now, "updated_at": now, "lease_expires_at": None,
+    }).eq("status", "running").lt("attempts", 1000000).lt("attempts", 3).lt("lease_expires_at", now).execute()
+
+
 def main() -> None:
     # Validate provider secrets before claiming work.
     routes = load_provider_routes()
@@ -141,6 +151,7 @@ def main() -> None:
     print(f"YJ-64 Council worker {WORKER_ID} ready; routes={','.join(routes)}", flush=True)
     while not stop_event.is_set():
         try:
+            fail_exhausted_leases()
             claimed = db.rpc("yj64_claim_council_api_request", {
                 "p_worker_id": WORKER_ID, "p_lease_seconds": LEASE_SECONDS,
             }).execute().data or []
