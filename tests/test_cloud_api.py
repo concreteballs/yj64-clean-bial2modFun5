@@ -31,6 +31,14 @@ class PortableCouncilApiValidationTests(unittest.TestCase):
     def test_valid_request_matches_public_contract(self):
         self.assertIsNone(validate_request(valid_body()))
 
+    def test_accepts_integral_json_numbers_and_rejects_non_string_ids(self):
+        body = valid_body()
+        body["limits"]["max_rounds"] = 1.0
+        self.assertIsNone(validate_request(body))
+        body = valid_body()
+        body["agent_id"] = 123
+        self.assertEqual(validate_request(body), "invalid_identifier")
+
     def test_rejects_unknown_fields_and_invalid_limits(self):
         body = valid_body()
         body["unexpected"] = True
