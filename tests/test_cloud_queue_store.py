@@ -35,16 +35,16 @@ class QueueStoreAdapterTests(unittest.TestCase):
 
     def test_progress_update_is_fenced_to_current_worker_and_running_state(self):
         self.store.update_progress("r-1", "worker-1", {"phase": "critique"})
-        table = self.client.table
-        table.assert_called_with("yj64_council_api_requests")
-        table.return_value.update.assert_called_once()
-        eq = table.return_value.update.return_value.eq
-        eq.assert_has_calls([
-            call("request_id", "r-1"),
-            call("worker_id", "worker-1"),
-            call("status", "running"),
-        ])
-        table.return_value.update.return_value.execute.assert_called_once()
+        self.client.table.assert_called_with("yj64_council_api_requests")
+        update = self.client.table.return_value.update
+        update.assert_called_once()
+        first_filter = update.return_value.eq
+        first_filter.assert_called_once_with("request_id", "r-1")
+        second_filter = first_filter.return_value.eq
+        second_filter.assert_called_once_with("worker_id", "worker-1")
+        third_filter = second_filter.return_value.eq
+        third_filter.assert_called_once_with("status", "running")
+        third_filter.return_value.execute.assert_called_once()
 
     def test_terminal_completion_clears_lease_and_errors(self):
         self.store.mark_completed("r-1", "worker-1", {"outcome": "consensus"})
