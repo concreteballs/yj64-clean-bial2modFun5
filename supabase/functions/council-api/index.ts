@@ -124,12 +124,14 @@ Deno.serve(async (req: Request) => {
     const workerReady = !workerError && Array.isArray(workers) && workers.length > 0;
     const adapterReady = Deno.env.get("YJ64_COUNCIL_ENGINE_ADAPTER") === "ready";
     const enabled = Deno.env.get("YJ64_COUNCIL_WORKER_ENABLED") === "true";
-    const ready = workerReady && adapterReady && enabled;
+    // Durable queue intake remains available while an ephemeral worker is offline.
+    const ready = adapterReady && enabled;
     return json({
       status: "ok", api: "up", database: "up",
       council_engine: adapterReady ? "configured" : "not_connected",
       worker: workerReady ? "running" : "not_deployed",
       active_workers: workerReady ? workers.length : 0,
+      worker_available: workerReady,
       ready_for_requests: ready
     });
   }
@@ -142,12 +144,6 @@ Deno.serve(async (req: Request) => {
     if (Deno.env.get("YJ64_COUNCIL_WORKER_ENABLED") !== "true" ||
         Deno.env.get("YJ64_COUNCIL_ENGINE_ADAPTER") !== "ready") {
       return json({ error: "council_engine_not_ready", message: "Request intake is disabled until the real Council worker and server-side engine adapter are deployed." }, 503);
-    }
-    const workerCutoff = new Date(Date.now() - 120_000).toISOString();
-    const { data: liveWorkers, error: workerLookupError } = await db.from("yj64_council_api_workers")
-      .select("worker_id").eq("status", "running").gt("last_seen_at", workerCutoff).limit(1);
-    if (workerLookupError || !liveWorkers?.length) {
-      return json({ error: "council_worker_unavailable", message: "No live Council worker heartbeat is available." }, 503);
     }
     const auth = await authenticate(req, "council:submit");
     if ("error" in auth) return auth.error;
