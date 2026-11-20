@@ -153,6 +153,21 @@ class PortableCouncilApiPostgresTests(unittest.TestCase):
         self.assertEqual(result.json()["error"], "cancelled")
 
 
+
+    def test_submit_is_accepted_without_a_live_worker_heartbeat(self):
+        with psycopg.connect(TEST_DATABASE_URL) as conn:
+            conn.execute("DELETE FROM public.yj64_council_api_workers")
+        idem = "idem-no-worker-" + uuid.uuid4().hex
+        response = self.client.post(
+            api.REQUEST_PATH, json=self.body(idem), headers=self.headers(idem)
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(response.json()["status"], "accepted")
+        health = self.client.get("/health")
+        self.assertEqual(health.status_code, 200)
+        self.assertFalse(health.json()["worker_available"])
+        self.assertTrue(health.json()["ready_for_requests"])
+
     def test_submit_worker_execution_and_result_round_trip(self):
         idem = "idem-worker-" + uuid.uuid4().hex
         submitted = self.client.post(
