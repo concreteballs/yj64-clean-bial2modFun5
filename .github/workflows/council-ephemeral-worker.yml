@@ -1,0 +1,50 @@
+name: Council ephemeral worker
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: yj64-council-ephemeral-worker
+  cancel-in-progress: false
+
+jobs:
+  process-queue:
+    # Three independent repository variables must be explicitly enabled.
+    # The deployed Supabase API also retains its own separate production gates.
+    if: >-
+      vars.YJ64_ENABLE_SCHEDULED_WORKER == 'true' &&
+      vars.YJ64_ENABLE_EXTERNAL_PROVIDER_CALLS == 'true' &&
+      vars.YJ64_COUNCIL_ENGINE_ADAPTER == 'ready'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      YJ64_QUEUE_BACKEND: supabase
+      YJ64_WORKER_MAX_TASKS: "4"
+      YJ64_WORKER_CONCURRENCY: "2"
+      YJ64_WORKER_LEASE_SECONDS: "180"
+      YJ64_ACTIONS_MAX_RUNTIME_SECONDS: "20400"
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      YJ64_COUNCIL_PROVIDER_CONFIG: ${{ secrets.YJ64_COUNCIL_PROVIDER_CONFIG }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: cloud_worker/requirements.txt
+      - name: Install worker dependencies
+        run: python -m pip install -r cloud_worker/requirements.txt
+      - name: Verify required secrets are configured
+        shell: bash
+        run: |
+          test -n "$SUPABASE_URL" || { echo "Missing SUPABASE_URL secret"; exit 1; }
+          test -n "$SUPABASE_SERVICE_ROLE_KEY" || { echo "Missing SUPABASE_SERVICE_ROLE_KEY secret"; exit 1; }
+          test -n "$YJ64_COUNCIL_PROVIDER_CONFIG" || { echo "Missing YJ64_COUNCIL_PROVIDER_CONFIG secret"; exit 1; }
+      - name: Process a bounded queue batch
+        run: python -m cloud_worker.github_actions_runner
