@@ -240,7 +240,10 @@ def health():
         "council_engine": "configured" if adapter_ready else "not_connected",
         "worker": "running" if worker_ready else "not_deployed",
         "active_workers": len(workers),
-        "ready_for_requests": worker_ready and adapter_ready and enabled,
+        "worker_available": worker_ready,
+        # Queue intake does not require an always-on worker. Accepted requests
+        # remain durable until an ephemeral or persistent worker claims them.
+        "ready_for_requests": adapter_ready and enabled,
     }
 
 
@@ -253,15 +256,6 @@ async def submit(request: Request):
             "error": "council_engine_not_ready",
             "message": "Request intake is disabled until the real Council worker and server-side engine adapter are deployed.",
         }, status_code=503)
-    try:
-        live = db_one(
-            "SELECT worker_id FROM public.yj64_council_api_workers "
-            "WHERE status = 'running' AND last_seen_at > now() - interval '120 seconds' LIMIT 1"
-        )
-    except Exception:
-        return error("database_unavailable", 503)
-    if not live:
-        return JSONResponse({"error": "council_worker_unavailable", "message": "No live Council worker heartbeat is available."}, status_code=503)
     agent = authenticate(request, "council:submit")
     if isinstance(agent, JSONResponse):
         return agent
