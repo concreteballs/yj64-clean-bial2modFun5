@@ -5,7 +5,8 @@ The repository contains a portable HTTP API and persistent worker. Both use one 
 ## Components
 
 - `cloud_worker/api.py` — FastAPI ingress implementing `yj64.council-api.v1`.
-- `cloud_worker/worker.py` — persistent Council execution worker.
+- `cloud_worker/worker.py` — persistent or bounded Council execution worker.
+- `cloud_worker/github_actions_runner.py` — time-limited entry point for ephemeral GitHub Actions workers.
 - `cloud_worker/queue_store.py` — Supabase compatibility and standard PostgreSQL adapters.
 - `cloud_worker/postgres/schema.sql` — standalone database schema.
 - `cloud_worker/compose.yaml` — API and worker containers using the same image and database.
@@ -103,6 +104,8 @@ The request intake gate is deliberately closed by default. Do not change either 
 ## Operations and migration
 
 - Worker concurrency is bounded by `YJ64_WORKER_CONCURRENCY` (1–8).
+- `YJ64_WORKER_MAX_TASKS=0` keeps the worker continuous (default for the Compose service); a positive value makes it exit after claiming that many tasks.
+- The GitHub Actions entry point defaults to a batch of 4 claims, drains all claimed work, and publishes a final `stopped` heartbeat. Set `YJ64_WORKER_MAX_TASKS` to override the batch size.
 - Leases are renewed while a task is running; expired leases can be reclaimed.
 - PostgreSQL is the source of truth. Container filesystems are disposable.
 - PostgreSQL data persists in the named `yj64-postgres-data` volume. Ordinary `docker compose down` preserves it; **never use `docker compose down -v` unless you intentionally want to delete the database**.
