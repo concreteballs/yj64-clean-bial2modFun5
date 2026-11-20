@@ -23,6 +23,26 @@ Re-check official limits before creating an instance:
 - https://render.com/docs/free
 - https://render.com/docs/background-workers
 
+
+## Ephemeral GitHub Actions worker
+
+`.github/workflows/council-ephemeral-worker.yml` is scheduled every five minutes and also supports manual dispatch. It is deliberately inert until **all four** repository variables are explicitly set:
+
+- `YJ64_ENABLE_SCHEDULED_WORKER=true`
+- `YJ64_ENABLE_EXTERNAL_PROVIDER_CALLS=true`
+- `YJ64_COUNCIL_ENGINE_ADAPTER=ready`
+- `YJ64_COUNCIL_WORKER_ENABLED=true`
+
+It also requires these Actions secrets:
+
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `YJ64_COUNCIL_PROVIDER_CONFIG`
+
+The provider configuration is a secret because it may contain billable provider credentials. Never enable the variables or add provider secrets until the provider routes, API authentication, cancellation, lease recovery and end-to-end acceptance tests have been reviewed. The deployed Supabase Edge Function has separate environment gates; changing GitHub repository variables does not change those Supabase gates.
+
+When enabled, each run processes at most four claims with concurrency two, then exits and publishes a stopped heartbeat. GitHub Actions may delay scheduled runs; this is a best-effort polling mechanism, not a real-time queue trigger. The current workflow is intentionally gated and must remain disabled during development.
+
 ## PostgreSQL preparation
 
 The Compose stack includes PostgreSQL 16 with a persistent named volume. On first initialization, the database container creates a database-owner/admin role and a separate restricted `yj64_runtime` role, applies `00-runtime-role.sql`, `schema.sql` and `02-runtime-grants.sql` in order, and grants the API/worker only the table and sequence privileges they need. The owner password is used only by the database container; the runtime password is used by API and worker. PostgreSQL is not published on a host port; only the API's loopback port is exposed.
