@@ -1,4 +1,4 @@
-"""Durable Council queue worker. Run as a separate long-lived container."""
+"""Durable Council queue worker (continuous or bounded one-shot mode)."""
 from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -10,7 +10,6 @@ import threading
 import traceback
 import uuid
 from typing import Any
-
 
 from cloud_worker.engine import CouncilCancelled, CouncilEngine, load_provider_routes
 from cloud_worker.queue_store import PostgresQueueStore, QueueStore, SupabaseQueueStore
@@ -110,54 +109,85 @@ def process(
 
 
 def main() -> None:
-    # Validate provider secrets before claiming work.
+    """Run continuously by default, or stop after YJ64_WORKER_MAX_TASKS claims.
+
+    A value of 0 preserves the long-lived service behavior. Bounded mode is
+    intended for ephemeral runners: it drains all claimed tasks before exit.
+    """
     global runtime_store, runtime_routes
+    stop_event.clear()
+    max_tasks = max(0, int(os.environ.get("YJ64_WORKER_MAX_TASKS", "0")))
     routes = load_provider_routes()
     store = build_queue_store()
     runtime_store = store
     runtime_routes = list(routes)
-    close_store = getattr(store, 'close', None)
+    close_store = getattr(store, "close", None)
     if callable(close_store):
         atexit.register(close_store)
-    store.publish_heartbeat(WORKER_ID, "running", list(routes))
-    print(
-        f"YJ-64 Council worker {WORKER_ID} ready; routes={','.join(routes)}; "
-        f"concurrency={WORKER_CONCURRENCY}",
-        flush=True,
-    )
-    # Each instance processes up to WORKER_CONCURRENCY independent requests.
-    # Additional instances claim rows through the database's atomic claim operation.
-    with ThreadPoolExecutor(max_workers=WORKER_CONCURRENCY) as executor:
-        active = set()
-        while not stop_event.is_set():
-            try:
-                store.publish_heartbeat(WORKER_ID, "running", list(routes))
-                store.fail_exhausted_leases()
-                while not stop_event.is_set() and len(active) < WORKER_CONCURRENCY:
-                    row = store.claim(WORKER_ID, LEASE_SECONDS)
-                    if row is None:
-                        break
-                    active.add(executor.submit(process, store, row, routes))
-                if active:
-                    completed, active = wait(
-                        active, timeout=POLL_SECONDS, return_when=FIRST_COMPLETED
+
+    claimed_count = 0
+    try:
+        store.publish_heartbeat(WORKER_ID, "running", list(routes))
+        print(
+            f"YJ-64 Council worker {WORKER_ID} ready; routes={','.join(routes)}; "
+            f"concurrency={WORKER_CONCURRENCY}; max_tasks={max_tasks or 'unlimited'}",
+            flush=True,
+        )
+        # Count claims, not completions: every claimed task consumes this run's
+        # budget even if it fails and is later recovered through lease expiry.
+        with ThreadPoolExecutor(max_workers=WORKER_CONCURRENCY) as executor:
+            active = set()
+            while active or (
+                not stop_event.is_set()
+                and (max_tasks == 0 or claimed_count < max_tasks)
+            ):
+                try:
+                    store.publish_heartbeat(WORKER_ID, "running", list(routes))
+                    store.fail_exhausted_leases()
+                    while (
+                        not stop_event.is_set()
+                        and (max_tasks == 0 or claimed_count < max_tasks)
+                        and len(active) < WORKER_CONCURRENCY
+                    ):
+                        row = store.claim(WORKER_ID, LEASE_SECONDS)
+                        if row is None:
+                            break
+                        claimed_count += 1
+                        active.add(executor.submit(process, store, row, routes))
+                    if active:
+                        completed, active = wait(
+                            active, timeout=POLL_SECONDS, return_when=FIRST_COMPLETED
+                        )
+                        for future in completed:
+                            try:
+                                future.result()
+                            except Exception as exc:
+                                print(
+                                    f"task execution error: {type(exc).__name__}: {str(exc)[:1000]}",
+                                    flush=True,
+                                )
+                    elif not stop_event.is_set() and (max_tasks == 0 or claimed_count < max_tasks):
+                        stop_event.wait(POLL_SECONDS)
+                except Exception as exc:
+                    print(
+                        f"worker loop error: {type(exc).__name__}: {str(exc)[:1000]}",
+                        flush=True,
                     )
-                    for future in completed:
-                        try:
-                            future.result()
-                        except Exception as exc:
-                            print(
-                                f"task execution error: {type(exc).__name__}: {str(exc)[:1000]}",
-                                flush=True,
-                            )
-                else:
-                    stop_event.wait(POLL_SECONDS)
-            except Exception as exc:
-                print(
-                    f"worker loop error: {type(exc).__name__}: {str(exc)[:1000]}",
-                    flush=True,
-                )
-                stop_event.wait(min(30, POLL_SECONDS * 3))
+                    if not active:
+                        stop_event.wait(min(30, POLL_SECONDS * 3))
+    finally:
+        # Mark the ephemeral worker inactive even when its bounded run or loop
+        # ends with an exception. In-flight task leases remain recoverable.
+        stop_event.set()
+        try:
+            store.publish_heartbeat(WORKER_ID, "stopped", list(routes))
+        except Exception as exc:
+            print(
+                f"could not publish stopped heartbeat: {type(exc).__name__}: {str(exc)[:500]}",
+                flush=True,
+            )
+        runtime_store = None
+        runtime_routes = []
 
 
 def shutdown(_signum: int, _frame: Any) -> None:
