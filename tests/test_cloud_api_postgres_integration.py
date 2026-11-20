@@ -186,9 +186,6 @@ class PortableCouncilApiPostgresTests(unittest.TestCase):
                     "unresolved_questions": [],
                 }
 
-        with PostgresQueueStore(TEST_DATABASE_URL, max_size=4) as_unused:
-            pass
-
         store = PostgresQueueStore(TEST_DATABASE_URL, max_size=4)
         try:
             row = store.claim("integration-worker", 90)
