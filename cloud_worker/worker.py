@@ -144,6 +144,7 @@ def main() -> None:
                 try:
                     store.publish_heartbeat(WORKER_ID, "running", list(routes))
                     store.fail_exhausted_leases()
+                    queue_empty = False
                     while (
                         not stop_event.is_set()
                         and (max_tasks == 0 or claimed_count < max_tasks)
@@ -151,6 +152,7 @@ def main() -> None:
                     ):
                         row = store.claim(WORKER_ID, LEASE_SECONDS)
                         if row is None:
+                            queue_empty = True
                             break
                         claimed_count += 1
                         active.add(executor.submit(process, store, row, routes))
@@ -166,7 +168,11 @@ def main() -> None:
                                     f"task execution error: {type(exc).__name__}: {str(exc)[:1000]}",
                                     flush=True,
                                 )
-                    elif not stop_event.is_set() and (max_tasks == 0 or claimed_count < max_tasks):
+                    if max_tasks > 0 and queue_empty and not active:
+                        # An ephemeral run exits when the queue is drained, even
+                        # when fewer than the configured batch limit were available.
+                        break
+                    if not active and not stop_event.is_set() and max_tasks == 0:
                         stop_event.wait(POLL_SECONDS)
                 except Exception as exc:
                     print(
