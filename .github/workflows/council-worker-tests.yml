@@ -23,6 +23,7 @@ on:
       - 'tests/test_cloud_postgres_queue_store.py'
       - 'tests/test_cloud_api.py'
       - 'tests/test_cloud_api_postgres_integration.py'
+      - 'tests/test_cloud_worker_lifecycle.py'
       - '.github/workflows/council-worker-tests.yml'
 
 permissions:
