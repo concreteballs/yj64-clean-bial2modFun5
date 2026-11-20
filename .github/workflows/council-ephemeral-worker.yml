@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   process-queue:
-    # Three independent repository variables must be explicitly enabled.
+    # Four independent repository variables must be explicitly enabled.
     # The deployed Supabase API also retains its own separate production gates.
     if: >-
       vars.YJ64_ENABLE_SCHEDULED_WORKER == 'true' &&
