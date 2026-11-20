@@ -8,6 +8,8 @@ from cloud_worker import worker
 
 
 def main() -> None:
+    # Ephemeral runners process a bounded batch by default; deployments may override it.
+    os.environ.setdefault("YJ64_WORKER_MAX_TASKS", "4")
     max_runtime = max(300, min(20_400, int(os.environ.get(
         "YJ64_ACTIONS_MAX_RUNTIME_SECONDS", "20400"
     ))))
