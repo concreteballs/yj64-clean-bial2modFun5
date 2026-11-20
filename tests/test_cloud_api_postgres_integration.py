@@ -5,6 +5,7 @@ import hashlib
 import os
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 import uuid
 
 import psycopg
@@ -16,6 +17,8 @@ if API_DATABASE_URL:
     os.environ["DATABASE_URL"] = API_DATABASE_URL
 
 from cloud_worker import api  # noqa: E402
+from cloud_worker.queue_store import PostgresQueueStore  # noqa: E402
+from cloud_worker import worker as council_worker  # noqa: E402
 
 
 @unittest.skipUnless(TEST_DATABASE_URL, "TEST_DATABASE_URL is not configured")
@@ -148,6 +151,71 @@ class PortableCouncilApiPostgresTests(unittest.TestCase):
         )
         self.assertEqual(result.status_code, 409)
         self.assertEqual(result.json()["error"], "cancelled")
+
+
+    def test_submit_worker_execution_and_result_round_trip(self):
+        idem = "idem-worker-" + uuid.uuid4().hex
+        submitted = self.client.post(
+            api.REQUEST_PATH, json=self.body(idem), headers=self.headers(idem)
+        )
+        self.assertEqual(submitted.status_code, 202, submitted.text)
+        request_id = submitted.json()["request_id"]
+
+        class DeterministicTestEngine:
+            def __init__(self, routes, report):
+                self.report = report
+
+            def run(self, request, claimed_request_id, session_id, is_cancelled):
+                self.report({"phase": "mock_provider_execution", "provider_calls": 0})
+                self.assert_not_cancelled = not is_cancelled()
+                if not self.assert_not_cancelled:
+                    raise RuntimeError("Unexpected cancellation in integration test")
+                return {
+                    "protocol_version": api.VERSION,
+                    "request_id": claimed_request_id,
+                    "session_id": session_id,
+                    "status": "completed",
+                    "outcome": "qualified_consensus",
+                    "summary": "Deterministic worker integration result; no external provider was called.",
+                    "claims": [],
+                    "participant_positions": [
+                        {"participant_id": "route_1", "position": "Test position", "rationale": "Mocked"}
+                    ],
+                    "dissent": [],
+                    "evidence": [],
+                    "unresolved_questions": [],
+                }
+
+        with PostgresQueueStore(TEST_DATABASE_URL, max_size=4) as_unused:
+            pass
+
+        store = PostgresQueueStore(TEST_DATABASE_URL, max_size=4)
+        try:
+            row = store.claim("integration-worker", 90)
+            self.assertIsNotNone(row)
+            self.assertEqual(row["request_id"], request_id)
+            with patch.object(council_worker, "CouncilEngine", DeterministicTestEngine):
+                council_worker.process(
+                    store, row,
+                    {
+                        "route_1": {"provider": "mock", "model": "test", "api_key": "not-used"},
+                        "route_2": {"provider": "mock", "model": "test", "api_key": "not-used"},
+                    },
+                )
+        finally:
+            store.close()
+
+        status = self.client.get(
+            f"{api.REQUEST_PATH}/{request_id}", headers=self.headers()
+        )
+        self.assertEqual(status.status_code, 200, status.text)
+        self.assertEqual(status.json()["status"], "completed")
+        result = self.client.get(
+            f"{api.REQUEST_PATH}/{request_id}/result", headers=self.headers()
+        )
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json()["outcome"], "qualified_consensus")
+        self.assertIn("Deterministic worker integration result", result.json()["summary"])
 
     def test_submit_gate_remains_closed_without_explicit_enablement(self):
         os.environ["YJ64_COUNCIL_WORKER_ENABLED"] = "false"
