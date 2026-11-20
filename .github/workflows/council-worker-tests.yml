@@ -61,7 +61,8 @@ jobs:
         run: >-
           python -m py_compile llm_api.py
           cloud_worker/engine.py cloud_worker/queue_store.py
-          cloud_worker/worker.py cloud_worker/api.py
+          cloud_worker/worker.py cloud_worker/github_actions_runner.py
+          cloud_worker/api.py
           tests/test_cloud_council_engine.py
           tests/test_cloud_queue_store.py
           tests/test_cloud_postgres_queue_store.py
