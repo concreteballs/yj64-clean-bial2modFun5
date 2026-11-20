@@ -5,6 +5,7 @@ on:
   pull_request:
     paths:
       - 'cloud_worker/**'
+      - '.github/workflows/council-ephemeral-worker.yml'
       - 'supabase/functions/council-api/**'
       - 'llm_api.py'
       - 'tests/test_cloud_council_engine.py'
