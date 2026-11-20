@@ -19,7 +19,8 @@ jobs:
     if: >-
       vars.YJ64_ENABLE_SCHEDULED_WORKER == 'true' &&
       vars.YJ64_ENABLE_EXTERNAL_PROVIDER_CALLS == 'true' &&
-      vars.YJ64_COUNCIL_ENGINE_ADAPTER == 'ready'
+      vars.YJ64_COUNCIL_ENGINE_ADAPTER == 'ready' &&
+      vars.YJ64_COUNCIL_WORKER_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 350
     env:
