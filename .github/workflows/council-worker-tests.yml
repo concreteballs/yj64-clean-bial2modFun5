@@ -18,6 +18,8 @@ on:
     branches: [main]
     paths:
       - 'cloud_worker/**'
+      - 'supabase/functions/council-api/**'
+      - '.github/workflows/council-ephemeral-worker.yml'
       - 'llm_api.py'
       - 'tests/test_cloud_council_engine.py'
       - 'tests/test_cloud_queue_store.py'
