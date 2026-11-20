@@ -27,6 +27,24 @@ class FakeQueueStore:
 
 
 class WorkerLifecycleTests(unittest.TestCase):
+    def test_bounded_worker_exits_when_queue_is_empty(self):
+        store = FakeQueueStore()
+        store.claim = lambda worker_id, lease_seconds: None
+        with (
+            patch.dict(os.environ, {"YJ64_WORKER_MAX_TASKS": "4"}),
+            patch.object(worker, "load_provider_routes", return_value={
+                "route_1": {"provider": "mock"},
+                "route_2": {"provider": "mock"},
+            }),
+            patch.object(worker, "build_queue_store", return_value=store),
+            patch.object(worker, "process") as process_mock,
+        ):
+            worker.main()
+
+        process_mock.assert_not_called()
+        self.assertEqual(store.claims, 0)
+        self.assertEqual(store.heartbeats[-1][1], "stopped")
+
     def test_bounded_worker_drains_claimed_task_and_marks_stopped(self):
         store = FakeQueueStore()
         with (
